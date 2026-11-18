@@ -13,8 +13,8 @@ enum class AiProviderType(
         displayName = "Gemini",
         requiresApiKey = true,
         defaultBaseUrl = "https://generativelanguage.googleapis.com",
-        defaultModels = listOf("gemini-2.5-flash", "gemini-3.8-flash", "gemini-3.5-flash-lite"),
-        description = "Google Gemini REST API (gemini-2.5-flash) using your encrypted API keys with automatic 429 rate-limit failover."
+        defaultModels = listOf(GEMINI_DEFAULT_MODEL, "gemini-3.5-flash-lite", "gemini-4-argon"),
+        description = "Google Gemini REST API ($GEMINI_DEFAULT_MODEL) using your encrypted API keys with automatic 429 rate-limit failover and 404 model fallback."
     ),
     GROQ(
         id = "GROQ",

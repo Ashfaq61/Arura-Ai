@@ -74,7 +74,7 @@ class AuraOrchestrator(
                 role = "AURA",
                 text = "AURA AI Neural Core online. I support English, اردو (Urdu), and Roman Urdu. Ask me to reason, research GitHub/Hugging Face, read the screen, control apps, analyze camera/PDFs, or build new tools.",
                 providerLabel = "Orchestrator",
-                modelLabel = "gemini-3.8-flash",
+                modelLabel = GEMINI_DEFAULT_MODEL,
                 agentsUsed = listOf("Main Brain / Orchestrator Agent"),
                 loopPhaseTrace = listOf("OBSERVE", "READY")
             )

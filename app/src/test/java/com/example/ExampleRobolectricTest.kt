@@ -435,10 +435,14 @@ class ExampleRobolectricTest {
     }
 
     @Test
-    fun `gemini key store saves up to 3 keys decrypts updates status and deletes`() {
+    fun `gemini key store saves up to 3 keys decrypts updates status and deletes and persists model`() {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val store = com.example.aura.security.GeminiKeyStore(context)
         store.clearAll()
+
+        assertEquals(com.example.aura.ai.GEMINI_DEFAULT_MODEL, store.getSelectedModel())
+        store.saveSelectedModel("gemini-custom-flash")
+        assertEquals("gemini-custom-flash", store.getSelectedModel())
 
         val k1 = store.saveKey("AIzaTestKeyNumberOne1111")
         val k2 = store.saveKey("AIzaTestKeyNumberTwo2222")
@@ -477,7 +481,7 @@ class ExampleRobolectricTest {
                     "invalid_key_403" -> 403 to """{"error":{"message":"API key not valid"}}"""
                     "bad_req_400" -> 400 to """{"error":{"message":"API_KEY_INVALID"}}"""
                     "offline_key" -> throw java.net.UnknownHostException("generativelanguage.googleapis.com")
-                    else -> 200 to """{"candidates":[{"content":{"parts":[{"text":"Hello from Gemini 2.5 Flash"}]}}]}"""
+                    else -> 200 to """{"candidates":[{"content":{"parts":[{"text":"Hello from Gemini 3.8 Flash"}]}}]}"""
                 }
                 okhttp3.Response.Builder()
                     .request(req)
@@ -496,7 +500,7 @@ class ExampleRobolectricTest {
         assertTrue(validRes.isValid)
         assertEquals("Key valid", validRes.message)
         assertTrue(seenUrls.last().contains("generativelanguage.googleapis.com"))
-        assertTrue(seenUrls.last().contains("gemini-2.5-flash:generateContent"))
+        assertTrue(seenUrls.last().contains("${com.example.aura.ai.GEMINI_DEFAULT_MODEL}:generateContent"))
 
         // Error mappings: 400, 403, 429, offline
         val invalid403 = client.testApiKey("invalid_key_403")
@@ -519,8 +523,65 @@ class ExampleRobolectricTest {
         assertTrue(failoverRes.isSuccess)
         val gen = failoverRes.getOrThrow()
         assertEquals(1, gen.keyIndexUsed)
-        assertEquals("Hello from Gemini 2.5 Flash", gen.text)
+        assertEquals("Hello from Gemini 3.8 Flash", gen.text)
         assertTrue(gen.failoverNotes.any { it.contains("429") })
+    }
+
+    @Test
+    fun `gemini rest client auto falls back via ListModels on HTTP 404 and retries once`() = runTest {
+        val seenRequests = mutableListOf<String>()
+        val mockHttp = okhttp3.OkHttpClient.Builder()
+            .addInterceptor { chain ->
+                val req = chain.request()
+                val urlStr = req.url.toString()
+                seenRequests.add("${req.method} $urlStr")
+                val (code, jsonBody) = when {
+                    urlStr.contains("/v1beta/models?") -> 200 to """
+                        {
+                          "models": [
+                            {"name": "models/gemini-4-pro", "supportedGenerationMethods": ["generateContent"]},
+                            {"name": "models/gemini-flash-embed", "supportedGenerationMethods": ["embedContent"]},
+                            {"name": "models/gemini-3.8-flash", "supportedGenerationMethods": ["generateContent", "countTokens"]}
+                          ]
+                        }
+                    """.trimIndent()
+                    urlStr.contains("deprecated-flash:generateContent") ->
+                        404 to """{"error":{"message":"This model models/deprecated-flash is no longer available."}}"""
+                    urlStr.contains("gemini-3.8-flash:generateContent") ->
+                        200 to """{"candidates":[{"content":{"parts":[{"text":"Recovered via fallback flash"}]}}]}"""
+                    else -> 404 to """{"error":{"message":"Unknown endpoint"}}"""
+                }
+                okhttp3.Response.Builder()
+                    .request(req)
+                    .protocol(okhttp3.Protocol.HTTP_1_1)
+                    .code(code)
+                    .message(if (code == 200) "OK" else "Not Found")
+                    .body(jsonBody.toResponseBody("application/json".toMediaType()))
+                    .build()
+            }
+            .build()
+
+        val client = com.example.aura.ai.GeminiRestClient(httpClient = mockHttp)
+        var capturedError: String? = null
+        var savedFallbackModel: String? = null
+
+        val result = client.generateContentWithFailover(
+            keys = listOf("test_key_404"),
+            prompt = "Hello",
+            modelId = "deprecated-flash",
+            onModelError = { capturedError = it },
+            onModelFallback = { savedFallbackModel = it }
+        )
+
+        assertTrue(result.isSuccess)
+        val gen = result.getOrThrow()
+        assertEquals("Recovered via fallback flash", gen.text)
+        assertEquals("gemini-3.8-flash", gen.modelUsed)
+        assertEquals("gemini-3.8-flash", savedFallbackModel)
+        assertTrue(capturedError.orEmpty().contains("404"))
+        assertTrue(gen.errorNotice.orEmpty().contains("404"))
+        assertTrue(seenRequests.any { it.contains("GET") && it.contains("/v1beta/models?key=test_key_404") })
+        assertEquals(3, seenRequests.size)
     }
 
     @Test
@@ -543,7 +604,7 @@ class ExampleRobolectricTest {
         val res = router.generateOnce(
             prompt = "Hello",
             providerId = AiProviderType.FIREBASE_GEMINI.id,
-            modelId = com.example.aura.ai.GeminiRestClient.DEFAULT_MODEL
+            modelId = com.example.aura.ai.GEMINI_DEFAULT_MODEL
         )
         assertTrue(res.isFailure)
         assertTrue(res.exceptionOrNull()?.message.orEmpty().contains("API key add karo"))

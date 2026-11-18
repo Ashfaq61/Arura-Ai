@@ -64,6 +64,7 @@ private data class AuraNavTab(
 fun AuraRootShell(viewModel: AuraViewModel) {
     var selectedTab by rememberSaveable { mutableIntStateOf(0) }
     val prefs by viewModel.preferences.collectAsStateWithLifecycle()
+    val activeModelInUse by viewModel.activeModelInUse.collectAsStateWithLifecycle()
     val agents by viewModel.agents.collectAsStateWithLifecycle()
     val emergencyStop by viewModel.emergencyStopActive.collectAsStateWithLifecycle()
     val pendingApprovals by viewModel.pendingApprovalCount.collectAsStateWithLifecycle()
@@ -113,7 +114,7 @@ fun AuraRootShell(viewModel: AuraViewModel) {
             topBar = {
                 Box(modifier = Modifier.statusBarsPadding()) {
                     AuraTopStatusBar(
-                        activeModel = prefs.activeModelId,
+                        activeModel = activeModelInUse,
                         agentsOnline = onlineCount,
                         emergencyStopActive = emergencyStop,
                         pendingApprovals = pendingApprovals,

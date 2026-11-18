@@ -7,6 +7,7 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.example.aura.ai.GEMINI_DEFAULT_MODEL
 import com.example.ui.theme.AuraThemeMode
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
@@ -18,7 +19,7 @@ data class AuraPreferences(
     val memoryEnabled: Boolean = true,
     val preferredLanguage: String = "AUTO",
     val activeProviderId: String = "FIREBASE_GEMINI",
-    val activeModelId: String = "gemini-2.5-flash",
+    val activeModelId: String = GEMINI_DEFAULT_MODEL,
     val activeVoiceName: String = "Kore",
     val themeMode: AuraThemeMode = AuraThemeMode.CYBER_OBSIDIAN,
     val backgroundEvolutionEnabled: Boolean = true,
@@ -65,7 +66,7 @@ class PreferencesRepository(private val context: Context) {
             memoryEnabled = prefs[Keys.MEMORY_ENABLED] ?: true,
             preferredLanguage = prefs[Keys.PREFERRED_LANGUAGE] ?: "AUTO",
             activeProviderId = prefs[Keys.ACTIVE_PROVIDER] ?: "FIREBASE_GEMINI",
-            activeModelId = prefs[Keys.ACTIVE_MODEL] ?: "gemini-2.5-flash",
+            activeModelId = prefs[Keys.ACTIVE_MODEL] ?: GEMINI_DEFAULT_MODEL,
             activeVoiceName = prefs[Keys.ACTIVE_VOICE] ?: "Kore",
             themeMode = theme,
             backgroundEvolutionEnabled = prefs[Keys.BG_EVOLUTION] ?: true,

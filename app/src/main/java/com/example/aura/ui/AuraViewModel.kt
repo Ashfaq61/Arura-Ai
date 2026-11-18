@@ -12,6 +12,7 @@ import com.example.aura.ai.AuraOrchestrator
 import com.example.aura.ai.BudgetPolicy
 import com.example.aura.ai.ChatTurn
 import com.example.aura.ai.DispatchTarget
+import com.example.aura.ai.GEMINI_DEFAULT_MODEL
 import com.example.aura.ai.GeminiRestClient
 import com.example.aura.ai.IncomingTaskRequest
 import com.example.aura.ai.LocalModelCandidate
@@ -60,6 +61,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import org.json.JSONArray
@@ -88,7 +91,8 @@ class AuraViewModel(application: Application) : AndroidViewModel(application) {
         privacyRouter = privacyRouter,
         modelRouter = modelRouter,
         geminiKeyStore = geminiKeyStore,
-        geminiRestClient = geminiRestClient
+        geminiRestClient = geminiRestClient,
+        preferencesRepository = preferencesRepository
     )
     val toolFactory = ToolFactoryAndEvolutionEngine(
         aiRouter, researchClient, memoryRepository, agentNetwork, permissionGuard, deviceControl
@@ -197,6 +201,22 @@ class AuraViewModel(application: Application) : AndroidViewModel(application) {
     private val _apiSlots = MutableStateFlow(vault.loadAllSlotsMetadata())
     val apiSlots: StateFlow<List<ApiKeySlot>> = _apiSlots.asStateFlow()
 
+    private val _selectedGeminiModel = MutableStateFlow(geminiKeyStore.getSelectedModel())
+    val selectedGeminiModel: StateFlow<String> = _selectedGeminiModel.asStateFlow()
+
+    val activeModelInUse: StateFlow<String> = combine(
+        preferences,
+        _selectedGeminiModel,
+        aiRouter.activeModelInUse
+    ) { prefs, savedGemini, routedModel ->
+        when {
+            prefs.intelligenceMode == "LOCAL_ONLY" -> "aura-offline-rules-v1"
+            routedModel.isNotBlank() -> routedModel
+            prefs.activeProviderId == AiProviderType.FIREBASE_GEMINI.id -> savedGemini
+            else -> prefs.activeModelId
+        }
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, geminiKeyStore.getSelectedModel())
+
     private val _geminiKeys = MutableStateFlow(geminiKeyStore.getKeys())
     val geminiKeys: StateFlow<List<GeminiKeyEntry>> = _geminiKeys.asStateFlow()
 
@@ -234,6 +254,38 @@ class AuraViewModel(application: Application) : AndroidViewModel(application) {
             memoryRepository.seedInitialCatalogIfEmpty()
             SelfEvolutionWorker.schedulePeriodic(getApplication())
             refreshHealth()
+
+            val currentPrefs = preferences.value
+            if (currentPrefs.activeProviderId == AiProviderType.FIREBASE_GEMINI.id) {
+                val saved = geminiKeyStore.getSelectedModel()
+                _selectedGeminiModel.value = saved
+                aiRouter.syncActiveModel(saved)
+                if (currentPrefs.activeModelId != saved) {
+                    preferencesRepository.setActiveProviderAndModel(AiProviderType.FIREBASE_GEMINI.id, saved)
+                }
+            } else {
+                aiRouter.syncActiveModel(currentPrefs.activeModelId)
+            }
+        }
+        viewModelScope.launch {
+            aiRouter.modelFallbackNotice.filterNotNull().collect { notice ->
+                _selectedGeminiModel.value = geminiKeyStore.getSelectedModel()
+                _statusBanner.value = notice
+                aiRouter.clearModelFallbackNotice()
+            }
+        }
+        viewModelScope.launch {
+            aiRouter.activeModelInUse.collect { model ->
+                if (preferences.value.activeProviderId == AiProviderType.FIREBASE_GEMINI.id) {
+                    val stored = geminiKeyStore.getSelectedModel()
+                    if (stored != _selectedGeminiModel.value) {
+                        _selectedGeminiModel.value = stored
+                    }
+                    if (model.isNotBlank() && model == stored && preferences.value.activeModelId != stored) {
+                        preferencesRepository.setActiveProviderAndModel(AiProviderType.FIREBASE_GEMINI.id, stored)
+                    }
+                }
+            }
         }
     }
 
@@ -360,11 +412,12 @@ class AuraViewModel(application: Application) : AndroidViewModel(application) {
         }
         viewModelScope.launch {
             _isBusy.value = true
-            _visionAnalysis.value = "Analyzing image with ${GeminiRestClient.DEFAULT_MODEL}..."
+            val modelToUse = selectedGeminiModel.value
+            _visionAnalysis.value = "Analyzing image with $modelToUse..."
             val res = aiRouter.generateOnce(
                 prompt = prompt.ifBlank { "Describe everything visible, read all text (OCR), and list actionable UI elements." },
                 providerId = AiProviderType.FIREBASE_GEMINI.id,
-                modelId = GeminiRestClient.DEFAULT_MODEL,
+                modelId = modelToUse,
                 imageBitmap = bitmap,
                 taskType = "vision",
                 redactSensitiveData = p.redactSensitiveData,
@@ -701,8 +754,22 @@ class AuraViewModel(application: Application) : AndroidViewModel(application) {
 
         viewModelScope.launch {
             _isTestingGeminiKey.value = true
-            val res = geminiRestClient.testApiKey(candidateKey, GeminiRestClient.DEFAULT_MODEL)
+            val targetModel = _selectedGeminiModel.value
+            val res = geminiRestClient.testApiKey(
+                apiKey = candidateKey,
+                modelId = targetModel,
+                onModelError = { err -> _statusBanner.value = err },
+                onModelFallback = { fallback ->
+                    val saved = geminiKeyStore.saveSelectedModel(fallback)
+                    _selectedGeminiModel.value = saved
+                    aiRouter.syncActiveModel(saved)
+                    preferencesRepository.setActiveProviderAndModel(AiProviderType.FIREBASE_GEMINI.id, saved)
+                }
+            )
             _geminiKeyTestStatus.value = res.isValid to res.message
+            if (res.errorNotice != null) {
+                _statusBanner.value = res.errorNotice
+            }
             val targetId = keyId ?: if (rawKeyInput.isBlank()) geminiKeyStore.getKeys().firstOrNull()?.id else null
             if (targetId != null) {
                 geminiKeyStore.updateKeyStatus(targetId, res.message)
@@ -711,7 +778,7 @@ class AuraViewModel(application: Application) : AndroidViewModel(application) {
             memoryRepository.upsertFeatureAudit(
                 com.example.aura.memory.FeatureAuditEntity(
                     id = "feat_ai_gemini",
-                    featureName = "Gemini REST API (gemini-2.5-flash)",
+                    featureName = "Gemini REST API (${res.resolvedModel})",
                     moduleName = "ai",
                     status = if (res.isValid) "ACTIVE" else "PARTIAL",
                     evidenceNote = res.message
@@ -752,11 +819,12 @@ class AuraViewModel(application: Application) : AndroidViewModel(application) {
             val (ok, msg) = aiRouter.testProviderConnection(provider, slotId)
             _apiSlots.value = vault.loadAllSlotsMetadata()
             _geminiKeys.value = geminiKeyStore.getKeys()
+            _selectedGeminiModel.value = geminiKeyStore.getSelectedModel()
             _statusBanner.value = msg
             memoryRepository.upsertFeatureAudit(
                 com.example.aura.memory.FeatureAuditEntity(
                     id = if (provider == AiProviderType.FIREBASE_GEMINI) "feat_ai_gemini" else "feat_multi_provider",
-                    featureName = if (provider == AiProviderType.FIREBASE_GEMINI) "Gemini REST API (gemini-2.5-flash)" else "Model Router, Budget & Free-Only Guard",
+                    featureName = if (provider == AiProviderType.FIREBASE_GEMINI) "Gemini REST API (${_selectedGeminiModel.value})" else "Model Router, Budget & Free-Only Guard",
                     moduleName = "ai",
                     status = if (ok) "ACTIVE" else "PARTIAL",
                     evidenceNote = msg
@@ -837,8 +905,26 @@ class AuraViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch { preferencesRepository.setThemeMode(mode) }
     }
 
+    fun selectGeminiModel(modelId: String) {
+        val saved = geminiKeyStore.saveSelectedModel(modelId)
+        _selectedGeminiModel.value = saved
+        aiRouter.syncActiveModel(saved)
+        viewModelScope.launch {
+            preferencesRepository.setActiveProviderAndModel(AiProviderType.FIREBASE_GEMINI.id, saved)
+        }
+        _statusBanner.value = "Gemini model set to $saved"
+    }
+
     fun setProviderAndModel(providerId: String, modelId: String) {
-        viewModelScope.launch { preferencesRepository.setActiveProviderAndModel(providerId, modelId) }
+        val resolved = if (providerId == AiProviderType.FIREBASE_GEMINI.id) {
+            val saved = geminiKeyStore.saveSelectedModel(modelId)
+            _selectedGeminiModel.value = saved
+            saved
+        } else {
+            modelId.trim().ifBlank { GEMINI_DEFAULT_MODEL }
+        }
+        aiRouter.syncActiveModel(resolved)
+        viewModelScope.launch { preferencesRepository.setActiveProviderAndModel(providerId, resolved) }
     }
 
     fun setVoicePreset(name: String) {

@@ -66,8 +66,8 @@ class ModelRoutingEngine {
         ),
         ModelCapabilityProfile(
             providerId = AiProviderType.FIREBASE_GEMINI.id,
-            modelId = "gemini-2.5-flash",
-            displayName = "Gemini 2.5 Flash",
+            modelId = GEMINI_DEFAULT_MODEL,
+            displayName = "Gemini 3.8 Flash",
             isPaidTier = false,
             estimatedCostPer1MTokensUsd = 0.0,
             contextTokens = 1_000_000,
@@ -76,7 +76,7 @@ class ModelRoutingEngine {
             supportsVision = true,
             supportsLiveAudio = true,
             supportsOffline = false,
-            taskStrength = "Fast multimodal Gemini REST model using user API keys"
+            taskStrength = "Default fast multimodal Gemini REST model using user API keys"
         ),
         ModelCapabilityProfile(
             providerId = AiProviderType.FIREBASE_GEMINI.id,
@@ -91,20 +91,6 @@ class ModelRoutingEngine {
             supportsLiveAudio = false,
             supportsOffline = false,
             taskStrength = "Ultra-fast classification, translation, summarization"
-        ),
-        ModelCapabilityProfile(
-            providerId = AiProviderType.FIREBASE_GEMINI.id,
-            modelId = "gemini-3.8-flash",
-            displayName = "Gemini 3.8 Flash",
-            isPaidTier = false,
-            estimatedCostPer1MTokensUsd = 0.0,
-            contextTokens = 1_000_000,
-            avgLatencyMs = 1100,
-            supportsTools = true,
-            supportsVision = true,
-            supportsLiveAudio = true,
-            supportsOffline = false,
-            taskStrength = "Default multimodal orchestration, GUI vision, planning"
         ),
         ModelCapabilityProfile(
             providerId = AiProviderType.FIREBASE_GEMINI.id,
@@ -243,7 +229,7 @@ class ModelRoutingEngine {
 
         // Never silently use a paid tier when freeOnlyMode is enabled
         if (policy.freeOnlyMode && (chosenProfile?.isPaidTier == true || preferredModelId == "gemini-4-argon")) {
-            val safeModel = if (requiresVision || isComplexReasoning) "gemini-3.8-flash" else "gemini-3.5-flash-lite"
+            val safeModel = if (requiresVision || isComplexReasoning) GEMINI_DEFAULT_MODEL else "gemini-3.5-flash-lite"
             return RoutingDecision(
                 providerId = AiProviderType.FIREBASE_GEMINI.id,
                 modelId = safeModel,
@@ -256,8 +242,8 @@ class ModelRoutingEngine {
         if (todaySpendUsd >= policy.dailyBudgetUsd && chosenProfile?.isPaidTier == true) {
             return RoutingDecision(
                 providerId = AiProviderType.FIREBASE_GEMINI.id,
-                modelId = "gemini-3.8-flash",
-                reason = "Daily spend cap ($${"%.2f".format(policy.dailyBudgetUsd)}) reached; downgraded to free-tier Gemini 3.8 Flash.",
+                modelId = GEMINI_DEFAULT_MODEL,
+                reason = "Daily spend cap ($${"%.2f".format(policy.dailyBudgetUsd)}) reached; downgraded to free-tier $GEMINI_DEFAULT_MODEL.",
                 estimatedCostUsd = 0.0,
                 allowedByBudget = false
             )
@@ -266,8 +252,8 @@ class ModelRoutingEngine {
         if (requiresVision && chosenProfile?.supportsVision == false) {
             return RoutingDecision(
                 providerId = AiProviderType.FIREBASE_GEMINI.id,
-                modelId = "gemini-3.8-flash",
-                reason = "Task requires multimodal Vision; routed to Gemini 3.8 Flash.",
+                modelId = GEMINI_DEFAULT_MODEL,
+                reason = "Task requires multimodal Vision; routed to $GEMINI_DEFAULT_MODEL.",
                 estimatedCostUsd = 0.0,
                 allowedByBudget = true
             )

@@ -5,6 +5,7 @@ import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
 import android.util.Log
+import com.example.aura.ai.GEMINI_DEFAULT_MODEL
 import org.json.JSONArray
 import org.json.JSONObject
 import java.security.KeyStore
@@ -23,7 +24,7 @@ data class GeminiKeyEntry(
 )
 
 /**
- * Encrypted storage for up to 3 user-supplied Gemini API keys.
+ * Encrypted storage for up to 3 user-supplied Gemini API keys and the user's selected Gemini model.
  * Uses Android Keystore AES-256-GCM encryption over private SharedPreferences.
  * Never hardcodes or logs plaintext API keys.
  */
@@ -31,6 +32,23 @@ class GeminiKeyStore(context: Context) {
 
     private val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
     private val keyAlias = "aura_gemini_api_key_aes"
+
+    fun hasExplicitSelectedModel(): Boolean {
+        return !prefs.getString(SELECTED_MODEL_KEY, null).isNullOrBlank()
+    }
+
+    fun getSelectedModel(): String {
+        return prefs.getString(SELECTED_MODEL_KEY, null)
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
+            ?: GEMINI_DEFAULT_MODEL
+    }
+
+    fun saveSelectedModel(modelId: String): String {
+        val cleaned = modelId.trim().removePrefix("models/").ifBlank { GEMINI_DEFAULT_MODEL }
+        prefs.edit().putString(SELECTED_MODEL_KEY, cleaned).apply()
+        return cleaned
+    }
 
     fun getKeys(): List<GeminiKeyEntry> {
         val rawJson = prefs.getString(META_KEY, null) ?: return emptyList()
@@ -204,6 +222,7 @@ class GeminiKeyStore(context: Context) {
         private const val PREFS_NAME = "aura_gemini_encrypted_keys"
         private const val META_KEY = "gemini_keys_meta"
         private const val SECRET_PREFIX = "gemini_secret_"
+        private const val SELECTED_MODEL_KEY = "gemini_selected_model"
         private const val ANDROID_KEYSTORE = "AndroidKeyStore"
         private const val TRANSFORMATION = "AES/GCM/NoPadding"
     }

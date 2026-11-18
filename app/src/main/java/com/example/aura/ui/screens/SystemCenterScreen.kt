@@ -34,12 +34,16 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExposedDropdownMenuBox
+import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.MenuAnchorType
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.PrimaryScrollableTabRow
@@ -65,6 +69,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.aura.ai.AiProviderType
 import com.example.aura.ai.AuraVoiceCatalog
+import com.example.aura.ai.GEMINI_DEFAULT_MODEL
 import com.example.aura.security.ActionSafetyLevel
 import com.example.aura.security.GeminiKeyStore
 import com.example.aura.ui.AuraViewModel
@@ -423,7 +428,7 @@ private fun SecurityCenterTab(viewModel: AuraViewModel) {
     }
 }
 
-@OptIn(ExperimentalLayoutApi::class)
+@OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
 @Composable
 private fun ApiAndVoiceSettingsTab(viewModel: AuraViewModel) {
     val context = LocalContext.current
@@ -433,9 +438,12 @@ private fun ApiAndVoiceSettingsTab(viewModel: AuraViewModel) {
     val geminiKeys by viewModel.geminiKeys.collectAsStateWithLifecycle()
     val geminiTestStatus by viewModel.geminiKeyTestStatus.collectAsStateWithLifecycle()
     val isTestingGeminiKey by viewModel.isTestingGeminiKey.collectAsStateWithLifecycle()
+    val selectedGeminiModel by viewModel.selectedGeminiModel.collectAsStateWithLifecycle()
 
     var geminiKeyInput by remember { mutableStateOf("") }
     var showGeminiKey by remember { mutableStateOf(false) }
+    var modelDropdownExpanded by remember { mutableStateOf(false) }
+    var customModelInput by remember(selectedGeminiModel) { mutableStateOf(selectedGeminiModel) }
 
     var selectedSlotProvider by remember { mutableStateOf(AiProviderType.GROQ) }
     var keyLabel by remember { mutableStateOf("") }
@@ -463,7 +471,12 @@ private fun ApiAndVoiceSettingsTab(viewModel: AuraViewModel) {
                             FilterChip(
                                 selected = prefs.activeProviderId == provider.id,
                                 onClick = {
-                                    viewModel.setProviderAndModel(provider.id, provider.defaultModels.first())
+                                    val targetModel = if (provider == AiProviderType.FIREBASE_GEMINI) {
+                                        selectedGeminiModel
+                                    } else {
+                                        provider.defaultModels.first()
+                                    }
+                                    viewModel.setProviderAndModel(provider.id, targetModel)
                                 },
                                 label = { Text(provider.displayName.substringBefore(" (")) },
                                 modifier = Modifier.testTag("provider_chip_${provider.id.lowercase()}")
@@ -474,13 +487,83 @@ private fun ApiAndVoiceSettingsTab(viewModel: AuraViewModel) {
                     val activeProvider = AiProviderType.entries.firstOrNull { it.id == prefs.activeProviderId } ?: AiProviderType.FIREBASE_GEMINI
                     Text(activeProvider.description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Spacer(modifier = Modifier.height(8.dp))
-                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        activeProvider.defaultModels.forEach { model ->
-                            FilterChip(
-                                selected = prefs.activeModelId == model,
-                                onClick = { viewModel.setProviderAndModel(activeProvider.id, model) },
-                                label = { Text(model) }
+
+                    if (activeProvider == AiProviderType.FIREBASE_GEMINI) {
+                        val presetOptions = listOf(
+                            GEMINI_DEFAULT_MODEL to "$GEMINI_DEFAULT_MODEL (default)",
+                            "gemini-3.5-flash-lite" to "gemini-3.5-flash-lite",
+                            "gemini-4-argon" to "gemini-4-argon"
+                        )
+                        val dropdownDisplayText = presetOptions.firstOrNull { it.first == selectedGeminiModel }?.second
+                            ?: "Custom ($selectedGeminiModel)"
+
+                        ExposedDropdownMenuBox(
+                            expanded = modelDropdownExpanded,
+                            onExpandedChange = { modelDropdownExpanded = !modelDropdownExpanded },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            OutlinedTextField(
+                                value = dropdownDisplayText,
+                                onValueChange = {},
+                                readOnly = true,
+                                label = { Text("Model") },
+                                trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = modelDropdownExpanded) },
+                                colors = ExposedDropdownMenuDefaults.outlinedTextFieldColors(),
+                                modifier = Modifier
+                                    .menuAnchor(MenuAnchorType.PrimaryNotEditable, enabled = true)
+                                    .fillMaxWidth()
+                                    .testTag("gemini_model_dropdown")
                             )
+                            ExposedDropdownMenu(
+                                expanded = modelDropdownExpanded,
+                                onDismissRequest = { modelDropdownExpanded = false }
+                            ) {
+                                presetOptions.forEach { (modelValue, modelLabel) ->
+                                    DropdownMenuItem(
+                                        text = { Text(modelLabel) },
+                                        onClick = {
+                                            customModelInput = modelValue
+                                            viewModel.selectGeminiModel(modelValue)
+                                            modelDropdownExpanded = false
+                                        }
+                                    )
+                                }
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            OutlinedTextField(
+                                value = customModelInput,
+                                onValueChange = { customModelInput = it },
+                                label = { Text("Custom Model Name") },
+                                placeholder = { Text("e.g. $GEMINI_DEFAULT_MODEL") },
+                                singleLine = true,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("gemini_custom_model_input")
+                            )
+                            Button(
+                                onClick = { viewModel.selectGeminiModel(customModelInput) },
+                                enabled = customModelInput.isNotBlank(),
+                                modifier = Modifier.testTag("save_gemini_model_btn")
+                            ) {
+                                Text("Save")
+                            }
+                        }
+                    } else {
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            activeProvider.defaultModels.forEach { model ->
+                                FilterChip(
+                                    selected = prefs.activeModelId == model,
+                                    onClick = { viewModel.setProviderAndModel(activeProvider.id, model) },
+                                    label = { Text(model) }
+                                )
+                            }
                         }
                     }
 

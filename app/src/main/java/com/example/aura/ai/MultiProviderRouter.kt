@@ -3,6 +3,7 @@ package com.example.aura.ai
 import android.graphics.Bitmap
 import android.util.Log
 import com.example.aura.memory.MemoryRepository
+import com.example.aura.memory.PreferencesRepository
 import com.example.aura.memory.ProviderUsageEntity
 import com.example.aura.security.AuraKeystoreVault
 import com.example.aura.security.GeminiKeyStore
@@ -51,13 +52,46 @@ class MultiProviderRouter(
     private val privacyRouter: PrivacyDataRouter = PrivacyDataRouter(),
     private val modelRouter: ModelRoutingEngine = ModelRoutingEngine(),
     private val geminiKeyStore: GeminiKeyStore? = null,
-    private val geminiRestClient: GeminiRestClient = GeminiRestClient()
+    private val geminiRestClient: GeminiRestClient = GeminiRestClient(),
+    private val preferencesRepository: PreferencesRepository? = null
 ) {
     private val _lastRoutedProviderInfo = MutableStateFlow("Ready • Privacy & Budget Router Armed")
     val lastRoutedProviderInfo: StateFlow<String> = _lastRoutedProviderInfo.asStateFlow()
 
     private val _lastRoutingDecision = MutableStateFlow<RoutingDecision?>(null)
     val lastRoutingDecision: StateFlow<RoutingDecision?> = _lastRoutingDecision.asStateFlow()
+
+    private val _activeModelInUse = MutableStateFlow(geminiKeyStore?.getSelectedModel() ?: GEMINI_DEFAULT_MODEL)
+    val activeModelInUse: StateFlow<String> = _activeModelInUse.asStateFlow()
+
+    private val _modelFallbackNotice = MutableStateFlow<String?>(null)
+    val modelFallbackNotice: StateFlow<String?> = _modelFallbackNotice.asStateFlow()
+
+    fun clearModelFallbackNotice() {
+        _modelFallbackNotice.value = null
+    }
+
+    fun syncActiveModel(modelId: String) {
+        if (modelId.isNotBlank()) {
+            _activeModelInUse.value = modelId
+        }
+    }
+
+    private fun handleGeminiModelError(errMsg: String) {
+        _modelFallbackNotice.value = errMsg
+    }
+
+    private suspend fun handleGeminiModelFallback(newModel: String) {
+        val saved = geminiKeyStore?.saveSelectedModel(newModel) ?: newModel
+        preferencesRepository?.setActiveProviderAndModel(AiProviderType.FIREBASE_GEMINI.id, saved)
+        _activeModelInUse.value = saved
+        val current = _modelFallbackNotice.value
+        _modelFallbackNotice.value = if (!current.isNullOrBlank()) {
+            "$current Auto-switched to $saved."
+        } else {
+            "Auto-switched Gemini model to $saved."
+        }
+    }
 
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(20, TimeUnit.SECONDS)
@@ -67,7 +101,7 @@ class MultiProviderRouter(
 
     // Lazily initialized Firebase AI Logic models
     private val geminiFlash by lazy {
-        Firebase.ai.generativeModel(modelName = "gemini-3.8-flash")
+        Firebase.ai.generativeModel(modelName = GEMINI_DEFAULT_MODEL)
     }
 
     private val geminiLite by lazy {
@@ -95,7 +129,7 @@ class MultiProviderRouter(
 
     private val geminiPlanner by lazy {
         Firebase.ai.generativeModel(
-            modelName = "gemini-3.8-flash",
+            modelName = GEMINI_DEFAULT_MODEL,
             generationConfig = generationConfig {
                 responseMimeType = "application/json"
                 responseSchema = plannerSchema
@@ -122,12 +156,16 @@ class MultiProviderRouter(
             if (keys.isEmpty()) {
                 return Result.failure(GeminiRestException(null, "API key add karo"))
             }
+            val selectedModel = geminiKeyStore.getSelectedModel()
             val restPrompt = "$prompt\n\nRespond with a single raw JSON object only (no markdown) matching keys: intent, language, summary, assignedAgents, safetyActionType, targetAppOrPackage, actionParameter, steps, clarifyingQuestion."
             return geminiRestClient.generateContentWithFailover(
                 keys = keys,
                 prompt = restPrompt,
-                modelId = GeminiRestClient.DEFAULT_MODEL
+                modelId = selectedModel,
+                onModelError = { handleGeminiModelError(it) },
+                onModelFallback = { handleGeminiModelFallback(it) }
             ).mapCatching { response ->
+                _activeModelInUse.value = response.modelUsed
                 val cleaned = response.text.trim()
                     .removePrefix("```json")
                     .removePrefix("```")
@@ -184,6 +222,7 @@ class MultiProviderRouter(
 
         // Offline local provider (zero external transmission)
         if (chosenProvider == AiProviderType.LOCAL_OFFLINE) {
+            _activeModelInUse.value = resolvedModelId
             _lastRoutedProviderInfo.value = "Local Offline Engine • ${decision.reason}"
             val reply = offlineRespond(prompt) + "\n\n[Routing: ${decision.reason}]"
             val latency = System.currentTimeMillis() - start
@@ -200,15 +239,18 @@ class MultiProviderRouter(
         val safeSys = sysReport.redactedText
         val totalRedactions = promptReport.redactionCount + sysReport.redactionCount
         val redactionNote = if (totalRedactions > 0) " • $totalRedactions secret(s) redacted" else ""
+        _activeModelInUse.value = resolvedModelId
         _lastRoutedProviderInfo.value = "${chosenProvider.displayName} ($resolvedModelId)$redactionNote"
 
-        // Gemini (User-Key REST API -> gemini-2.5-flash with 429 multi-key failover)
+        // Gemini (User-Key REST API -> selected/default model with 429 multi-key failover and 404 ListModels fallback)
         if (chosenProvider == AiProviderType.FIREBASE_GEMINI) {
             if (geminiKeyStore != null) {
+                val targetGeminiModel = resolvedModelId.ifBlank { geminiKeyStore.getSelectedModel() }
+                _activeModelInUse.value = targetGeminiModel
                 val keys = geminiKeyStore.getDecryptedKeys()
                 if (keys.isEmpty()) {
                     val missingMsg = "API key add karo: Settings mein apni Gemini API key save karein."
-                    recordUsageSafe(chosenProvider.id, GeminiRestClient.DEFAULT_MODEL, taskType, System.currentTimeMillis() - start, 0, false, missingMsg)
+                    recordUsageSafe(chosenProvider.id, targetGeminiModel, taskType, System.currentTimeMillis() - start, 0, false, missingMsg)
                     emit(StreamChunk.Error(missingMsg))
                     return@flow
                 }
@@ -217,11 +259,14 @@ class MultiProviderRouter(
                     prompt = safePrompt,
                     systemInstruction = safeSys,
                     imageBitmap = imageBitmap,
-                    modelId = GeminiRestClient.DEFAULT_MODEL
+                    modelId = targetGeminiModel,
+                    onModelError = { handleGeminiModelError(it) },
+                    onModelFallback = { handleGeminiModelFallback(it) }
                 )
                 if (restResult.isSuccess) {
                     val response = restResult.getOrThrow()
                     val latency = System.currentTimeMillis() - start
+                    _activeModelInUse.value = response.modelUsed
                     val failoverNote = if (response.failoverNotes.isNotEmpty()) " • ${response.failoverNotes.joinToString(" ")}" else ""
                     _lastRoutedProviderInfo.value = "Gemini (${response.modelUsed}) • Key #${response.keyIndexUsed + 1}$failoverNote$redactionNote"
                     recordUsageSafe(chosenProvider.id, response.modelUsed, taskType, latency, response.text.length / 4, true)
@@ -243,10 +288,11 @@ class MultiProviderRouter(
                     val errEx = restResult.exceptionOrNull()
                     val httpCode = (errEx as? GeminiRestException)?.httpCode
                     val err = errEx?.message ?: "Gemini REST API request failed."
-                    recordUsageSafe(chosenProvider.id, GeminiRestClient.DEFAULT_MODEL, taskType, System.currentTimeMillis() - start, 0, false, err)
-                    if (autoFallback && budgetPolicy.intelligenceMode != "LOCAL_ONLY" && httpCode != 400 && httpCode != 403 && httpCode != null) {
+                    recordUsageSafe(chosenProvider.id, targetGeminiModel, taskType, System.currentTimeMillis() - start, 0, false, err)
+                    if (autoFallback && budgetPolicy.intelligenceMode != "LOCAL_ONLY" && httpCode != 400 && httpCode != 403 && httpCode != 404 && httpCode != null) {
                         val fallbackOutcome = tryFallbackProviders(safePrompt, safeSys, excludeProvider = chosenProvider.id)
                         if (fallbackOutcome != null) {
+                            _activeModelInUse.value = fallbackOutcome.modelUsed
                             _lastRoutedProviderInfo.value = "${fallbackOutcome.providerUsed} (${fallbackOutcome.modelUsed}) [Fallback]$redactionNote"
                             emit(StreamChunk.Delta(fallbackOutcome.text, fallbackOutcome.providerUsed, fallbackOutcome.modelUsed))
                             emit(StreamChunk.Done(fallbackOutcome))
@@ -332,7 +378,7 @@ class MultiProviderRouter(
         prompt: String,
         systemInstruction: String = "",
         providerId: String = AiProviderType.FIREBASE_GEMINI.id,
-        modelId: String = "gemini-3.8-flash",
+        modelId: String = GEMINI_DEFAULT_MODEL,
         imageBitmap: Bitmap? = null,
         taskType: String = "utility",
         redactSensitiveData: Boolean = true,
@@ -355,6 +401,7 @@ class MultiProviderRouter(
 
         val chosen = AiProviderType.entries.firstOrNull { it.id == decision.providerId } ?: AiProviderType.FIREBASE_GEMINI
         val targetModelId = decision.modelId
+        _activeModelInUse.value = targetModelId
         if (chosen == AiProviderType.LOCAL_OFFLINE) {
             _lastRoutedProviderInfo.value = "Local Offline Engine • ${decision.reason}"
             val offline = offlineRespond(prompt)
@@ -368,10 +415,12 @@ class MultiProviderRouter(
 
         if (chosen == AiProviderType.FIREBASE_GEMINI) {
             if (geminiKeyStore != null) {
+                val resolvedGeminiModel = targetModelId.ifBlank { geminiKeyStore.getSelectedModel() }
+                _activeModelInUse.value = resolvedGeminiModel
                 val keys = geminiKeyStore.getDecryptedKeys()
                 if (keys.isEmpty()) {
                     val err = GeminiRestException(null, "API key add karo: Settings mein apni Gemini API key save karein.")
-                    recordUsageSafe(chosen.id, GeminiRestClient.DEFAULT_MODEL, taskType, System.currentTimeMillis() - start, 0, false, err.message)
+                    recordUsageSafe(chosen.id, resolvedGeminiModel, taskType, System.currentTimeMillis() - start, 0, false, err.message)
                     return Result.failure(err)
                 }
                 return geminiRestClient.generateContentWithFailover(
@@ -379,10 +428,13 @@ class MultiProviderRouter(
                     prompt = safePrompt,
                     systemInstruction = safeSys,
                     imageBitmap = imageBitmap,
-                    modelId = GeminiRestClient.DEFAULT_MODEL
+                    modelId = resolvedGeminiModel,
+                    onModelError = { handleGeminiModelError(it) },
+                    onModelFallback = { handleGeminiModelFallback(it) }
                 ).fold(
                     onSuccess = { res ->
                         val latency = System.currentTimeMillis() - start
+                        _activeModelInUse.value = res.modelUsed
                         val failoverNote = if (res.failoverNotes.isNotEmpty()) " • ${res.failoverNotes.joinToString(" ")}" else ""
                         _lastRoutedProviderInfo.value = "Gemini (${res.modelUsed}) • Key #${res.keyIndexUsed + 1}$failoverNote"
                         recordUsageSafe(chosen.id, res.modelUsed, taskType, latency, res.text.length / 4, true)
@@ -398,7 +450,7 @@ class MultiProviderRouter(
                         )
                     },
                     onFailure = { e ->
-                        recordUsageSafe(chosen.id, GeminiRestClient.DEFAULT_MODEL, taskType, System.currentTimeMillis() - start, 0, false, e.message.orEmpty())
+                        recordUsageSafe(chosen.id, resolvedGeminiModel, taskType, System.currentTimeMillis() - start, 0, false, e.message.orEmpty())
                         Result.failure(e)
                     }
                 )
@@ -434,6 +486,7 @@ class MultiProviderRouter(
             ?: return Result.failure(IllegalStateException("No API key configured for ${chosen.displayName}"))
         val endpoint = slot.first.customBaseUrl.ifBlank { chosen.defaultBaseUrl }
         val resolvedModel = slot.first.preferredModel.ifBlank { targetModelId }
+        _activeModelInUse.value = resolvedModel
         return callOpenAiCompatible(endpoint, slot.second, resolvedModel, safeSys, safePrompt).map { text ->
             val latency = System.currentTimeMillis() - start
             recordUsageSafe(chosen.id, resolvedModel, taskType, latency, text.length / 4, true)
@@ -457,7 +510,13 @@ class MultiProviderRouter(
                     if (keyToTest.isNullOrBlank()) {
                         return false to "API key add karo: Save a Gemini API key first."
                     }
-                    val testRes = geminiRestClient.testApiKey(keyToTest, GeminiRestClient.DEFAULT_MODEL)
+                    val modelToTest = geminiKeyStore.getSelectedModel()
+                    val testRes = geminiRestClient.testApiKey(
+                        apiKey = keyToTest,
+                        modelId = modelToTest,
+                        onModelError = { handleGeminiModelError(it) },
+                        onModelFallback = { handleGeminiModelFallback(it) }
+                    )
                     if (slotId != null) {
                         geminiKeyStore.updateKeyStatus(slotId, testRes.message)
                     }
@@ -556,7 +615,7 @@ class MultiProviderRouter(
             prompt = prompt,
             systemInstruction = systemInstruction,
             providerId = AiProviderType.FIREBASE_GEMINI.id,
-            modelId = "gemini-3.8-flash",
+            modelId = geminiKeyStore?.getSelectedModel() ?: GEMINI_DEFAULT_MODEL,
             imageBitmap = imageBitmap,
             taskType = "fallback"
         )
