@@ -359,8 +359,30 @@ class AuraViewModel(application: Application) : AndroidViewModel(application) {
         onDispatchPrompt = { cmd -> sendCommand(cmd, speakReply = false) }
     )
 
+    val historyController: AuraHistoryController = AuraHistoryController(
+        app = application,
+        scope = viewModelScope,
+        db = db,
+        memoryRepository = memoryRepository,
+        preferencesRepository = preferencesRepository,
+        aiRouter = aiRouter,
+        agentNetwork = agentNetwork,
+        permissionGuard = permissionGuard,
+        deviceControl = deviceControl,
+        toolFactory = toolFactory,
+        researchClient = researchClient,
+        orchestrator = orchestrator,
+        preferences = preferences,
+        researchProjects = researchProjects,
+        tasks = tasks,
+        evolutionCycles = evolutionCycles,
+        auditLogs = auditLogs,
+        onBanner = { msg -> _statusBanner.value = msg }
+    )
+
     init {
         expansion.initialize()
+        historyController.initialize()
         viewModelScope.launch {
             memoryRepository.seedInitialCatalogIfEmpty()
             SelfEvolutionWorker.schedulePeriodic(getApplication())

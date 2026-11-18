@@ -2,12 +2,19 @@ package com.example.aura.security
 
 import android.util.Base64
 import com.example.aura.memory.AdvancedRepository
+import com.example.aura.memory.AgentConversationEntity
+import com.example.aura.memory.AgentHistoryRepository
 import com.example.aura.memory.AppCompatibilityProfileEntity
 import com.example.aura.memory.AutomationRecipeEntity
+import com.example.aura.memory.CustomAgentProfileEntity
+import com.example.aura.memory.FeatureRecommendationEntity
+import com.example.aura.memory.FeatureRegistryHistoryEntity
+import com.example.aura.memory.FeatureRequestEntity
 import com.example.aura.memory.KnowledgeEdgeEntity
 import com.example.aura.memory.KnowledgeNodeEntity
 import com.example.aura.memory.MemoryEntryEntity
 import com.example.aura.memory.MemoryRepository
+import com.example.aura.memory.PendingChangeProposalEntity
 import com.example.aura.memory.ProductivityItemEntity
 import com.example.aura.memory.RoutineEntity
 import com.example.aura.memory.VisualWorkflowEntity
@@ -27,7 +34,8 @@ data class BackupExportOptions(
     val includeKnowledgeGraph: Boolean = true,
     val includeRecipes: Boolean = true,
     val includeProductivity: Boolean = true,
-    val includeCompatibilityProfiles: Boolean = true
+    val includeCompatibilityProfiles: Boolean = true,
+    val includeAgentHistoryAndControl: Boolean = true
 )
 
 data class BackupRestoreSummary(
@@ -37,7 +45,8 @@ data class BackupRestoreSummary(
     val knowledgeNodesRestored: Int,
     val recipesRestored: Int,
     val productivityRestored: Int,
-    val compatRestored: Int
+    val compatRestored: Int,
+    val agentHistoryRecordsRestored: Int = 0
 )
 
 /**
@@ -46,7 +55,8 @@ data class BackupRestoreSummary(
  */
 class EncryptedBackupManager(
     private val memoryRepo: MemoryRepository,
-    private val advancedRepo: AdvancedRepository
+    private val advancedRepo: AdvancedRepository,
+    private val historyRepo: AgentHistoryRepository? = null
 ) {
     suspend fun createEncryptedBackup(passphrase: String, options: BackupExportOptions = BackupExportOptions()): Result<String> {
         if (passphrase.length < 6) {
@@ -155,6 +165,113 @@ class EncryptedBackupManager(
                 })
             }
             root.put("compatibilityProfiles", arr)
+        }
+        if (options.includeAgentHistoryAndControl && historyRepo != null) {
+            val convArr = JSONArray()
+            historyRepo.getRecentConversations(500).forEach { c ->
+                convArr.put(JSONObject().apply {
+                    put("conversationId", c.conversationId)
+                    put("sessionId", c.sessionId)
+                    put("agentId", c.agentId)
+                    put("agentName", c.agentName)
+                    put("participatingAgentsCsv", c.participatingAgentsCsv)
+                    put("channelType", c.channelType)
+                    put("topic", c.topic)
+                    put("userOriginalRequest", c.userOriginalRequest)
+                    put("qaExchangedJson", c.qaExchangedJson)
+                    put("recommendationsMade", c.recommendationsMade)
+                    put("researchFindings", c.researchFindings)
+                    put("repositoryAndModelLinksCsv", c.repositoryAndModelLinksCsv)
+                    put("decisionsAndReasons", c.decisionsAndReasons)
+                    put("proposedFeaturesOrToolsCsv", c.proposedFeaturesOrToolsCsv)
+                    put("actionsPerformedCsv", c.actionsPerformedCsv)
+                    put("testResults", c.testResults)
+                    put("finalOutcome", c.finalOutcome)
+                    put("timestamp", c.timestamp)
+                })
+            }
+            root.put("agentConversations", convArr)
+
+            val agentsArr = JSONArray()
+            historyRepo.getCustomAgents().forEach { a ->
+                agentsArr.put(JSONObject().apply {
+                    put("codeName", a.codeName); put("numericId", a.numericId)
+                    put("name", a.name); put("roleDescription", a.roleDescription)
+                    put("capabilitiesCsv", a.capabilitiesCsv)
+                    put("preferredProviderId", a.preferredProviderId)
+                    put("preferredModelId", a.preferredModelId)
+                    put("createdFromRequestId", a.createdFromRequestId)
+                    put("isCustom", a.isCustom); put("enabled", a.enabled)
+                })
+            }
+            root.put("customAgents", agentsArr)
+
+            val regArr = JSONArray()
+            historyRepo.getAllRegistryHistory().forEach { r ->
+                regArr.put(JSONObject().apply {
+                    put("featureId", r.featureId); put("featureName", r.featureName)
+                    put("description", r.description); put("discoverySource", r.discoverySource)
+                    put("sourceUrl", r.sourceUrl); put("recommendingAgent", r.recommendingAgent)
+                    put("participatingAgentsCsv", r.participatingAgentsCsv)
+                    put("discoveredAt", r.discoveredAt); put("version", r.version)
+                    put("previousVersion", r.previousVersion ?: JSONObject.NULL)
+                    put("changeEventType", r.changeEventType); put("dependencies", r.dependencies)
+                    put("permissionsRequired", r.permissionsRequired)
+                    put("installationDate", r.installationDate ?: JSONObject.NULL)
+                    put("testResults", r.testResults); put("activationStatus", r.activationStatus)
+                    put("decisionReason", r.decisionReason); put("versionDiffSummary", r.versionDiffSummary)
+                    put("rollbackSnapshotJson", r.rollbackSnapshotJson); put("timestamp", r.timestamp)
+                })
+            }
+            root.put("featureRegistryHistory", regArr)
+
+            val reqArr = JSONArray()
+            historyRepo.getAllFeatureRequests().forEach { r ->
+                reqArr.put(JSONObject().apply {
+                    put("requestId", r.requestId); put("userPrompt", r.userPrompt)
+                    put("requestMode", r.requestMode); put("linkedSourceId", r.linkedSourceId)
+                    put("assignedAgentsCsv", r.assignedAgentsCsv); put("currentStage", r.currentStage)
+                    put("stageName", r.stageName); put("stageHistoryJson", r.stageHistoryJson)
+                    put("consultationSummary", r.consultationSummary); put("technicalPlan", r.technicalPlan)
+                    put("alternativesSummary", r.alternativesSummary); put("compatibilityReport", r.compatibilityReport)
+                    put("securityReport", r.securityReport); put("requiredApisAndPerms", r.requiredApisAndPerms)
+                    put("testReport", r.testReport); put("status", r.status); put("failureReason", r.failureReason)
+                    put("resultFeatureId", r.resultFeatureId)
+                })
+            }
+            root.put("featureRequests", reqArr)
+
+            val recArr = JSONArray()
+            historyRepo.getAllRecommendations().forEach { rec ->
+                recArr.put(JSONObject().apply {
+                    put("id", rec.id); put("featureName", rec.featureName)
+                    put("summaryWhatItDoes", rec.summaryWhatItDoes); put("whyAuraNeedsIt", rec.whyAuraNeedsIt)
+                    put("limitationSolved", rec.limitationSolved); put("discoveringAgent", rec.discoveringAgent)
+                    put("otherAgentOpinionsJson", rec.otherAgentOpinionsJson)
+                    put("sourceLinksCsv", rec.sourceLinksCsv); put("securityAssessment", rec.securityAssessment)
+                    put("compatibilityAssessment", rec.compatibilityAssessment)
+                    put("developmentEffort", rec.developmentEffort); put("costResourceImpact", rec.costResourceImpact)
+                    put("testRequirements", rec.testRequirements); put("inboxStatus", rec.inboxStatus)
+                    put("agentFollowUpNotes", rec.agentFollowUpNotes); put("linkedRequestId", rec.linkedRequestId)
+                })
+            }
+            root.put("featureRecommendations", recArr)
+
+            val propArr = JSONArray()
+            historyRepo.getAllProposals().forEach { p ->
+                propArr.put(JSONObject().apply {
+                    put("id", p.id); put("requestId", p.requestId); put("featureId", p.featureId)
+                    put("title", p.title); put("changeType", p.changeType); put("summary", p.summary)
+                    put("targetVersion", p.targetVersion); put("previousVersion", p.previousVersion ?: JSONObject.NULL)
+                    put("versionDiff", p.versionDiff); put("testReport", p.testReport)
+                    put("securityAssessment", p.securityAssessment)
+                    put("requiresExplicitApproval", p.requiresExplicitApproval)
+                    put("approvalReason", p.approvalReason)
+                    put("previousStateSnapshotJson", p.previousStateSnapshotJson)
+                    put("status", p.status); put("modificationNotes", p.modificationNotes)
+                })
+            }
+            root.put("pendingChangeProposals", propArr)
         }
         return root.toString()
     }
@@ -313,7 +430,169 @@ class EncryptedBackupManager(
                 }
             }
 
-            BackupRestoreSummary(memCount, routineCount, workflowCount, kgCount, recipeCount, prodCount, compatCount)
+            var historyCount = 0
+            if (historyRepo != null) {
+                root.optJSONArray("agentConversations")?.let { arr ->
+                    for (i in 0 until arr.length()) {
+                        val o = arr.getJSONObject(i)
+                        historyRepo.insertConversation(
+                            AgentConversationEntity(
+                                conversationId = o.optString("conversationId"),
+                                sessionId = o.optString("sessionId"),
+                                agentId = o.optString("agentId"),
+                                agentName = o.optString("agentName"),
+                                participatingAgentsCsv = o.optString("participatingAgentsCsv"),
+                                channelType = o.optString("channelType", "BRAIN_TO_AGENT"),
+                                topic = o.optString("topic"),
+                                userOriginalRequest = o.optString("userOriginalRequest"),
+                                qaExchangedJson = o.optString("qaExchangedJson", "[]"),
+                                recommendationsMade = o.optString("recommendationsMade"),
+                                researchFindings = o.optString("researchFindings"),
+                                repositoryAndModelLinksCsv = o.optString("repositoryAndModelLinksCsv"),
+                                decisionsAndReasons = o.optString("decisionsAndReasons"),
+                                proposedFeaturesOrToolsCsv = o.optString("proposedFeaturesOrToolsCsv"),
+                                actionsPerformedCsv = o.optString("actionsPerformedCsv"),
+                                testResults = o.optString("testResults"),
+                                finalOutcome = o.optString("finalOutcome"),
+                                timestamp = o.optLong("timestamp", System.currentTimeMillis())
+                            )
+                        )
+                        historyCount++
+                    }
+                }
+                root.optJSONArray("customAgents")?.let { arr ->
+                    for (i in 0 until arr.length()) {
+                        val o = arr.getJSONObject(i)
+                        historyRepo.upsertCustomAgent(
+                            CustomAgentProfileEntity(
+                                codeName = o.getString("codeName"),
+                                numericId = o.optInt("numericId", 25 + i),
+                                name = o.getString("name"),
+                                roleDescription = o.optString("roleDescription"),
+                                capabilitiesCsv = o.optString("capabilitiesCsv"),
+                                preferredProviderId = o.optString("preferredProviderId", "FIREBASE_GEMINI"),
+                                preferredModelId = o.optString("preferredModelId", "gemini-3.8-flash"),
+                                createdFromRequestId = o.optString("createdFromRequestId"),
+                                isCustom = o.optBoolean("isCustom", true),
+                                enabled = o.optBoolean("enabled", true)
+                            )
+                        )
+                        historyCount++
+                    }
+                }
+                root.optJSONArray("featureRegistryHistory")?.let { arr ->
+                    for (i in 0 until arr.length()) {
+                        val o = arr.getJSONObject(i)
+                        historyRepo.recordRegistryEvent(
+                            FeatureRegistryHistoryEntity(
+                                featureId = o.getString("featureId"),
+                                featureName = o.getString("featureName"),
+                                description = o.optString("description"),
+                                discoverySource = o.optString("discoverySource"),
+                                sourceUrl = o.optString("sourceUrl"),
+                                recommendingAgent = o.optString("recommendingAgent"),
+                                participatingAgentsCsv = o.optString("participatingAgentsCsv"),
+                                discoveredAt = o.optLong("discoveredAt", System.currentTimeMillis()),
+                                version = o.optString("version", "1.0.0"),
+                                previousVersion = if (o.isNull("previousVersion")) null else o.optString("previousVersion"),
+                                changeEventType = o.optString("changeEventType", "DISCOVERED"),
+                                dependencies = o.optString("dependencies"),
+                                permissionsRequired = o.optString("permissionsRequired"),
+                                installationDate = if (o.isNull("installationDate")) null else o.optLong("installationDate"),
+                                testResults = o.optString("testResults"),
+                                activationStatus = o.optString("activationStatus", "DISCOVERED_ONLY"),
+                                decisionReason = o.optString("decisionReason"),
+                                versionDiffSummary = o.optString("versionDiffSummary"),
+                                rollbackSnapshotJson = o.optString("rollbackSnapshotJson", "{}"),
+                                timestamp = o.optLong("timestamp", System.currentTimeMillis())
+                            )
+                        )
+                        historyCount++
+                    }
+                }
+                root.optJSONArray("featureRequests")?.let { arr ->
+                    for (i in 0 until arr.length()) {
+                        val o = arr.getJSONObject(i)
+                        historyRepo.upsertFeatureRequest(
+                            FeatureRequestEntity(
+                                requestId = o.getString("requestId"),
+                                userPrompt = o.optString("userPrompt"),
+                                requestMode = o.optString("requestMode", "NATURAL"),
+                                linkedSourceId = o.optString("linkedSourceId"),
+                                assignedAgentsCsv = o.optString("assignedAgentsCsv"),
+                                currentStage = o.optInt("currentStage", 1),
+                                stageName = o.optString("stageName", "SAVED_REQUEST"),
+                                stageHistoryJson = o.optString("stageHistoryJson", "[]"),
+                                consultationSummary = o.optString("consultationSummary"),
+                                technicalPlan = o.optString("technicalPlan"),
+                                alternativesSummary = o.optString("alternativesSummary"),
+                                compatibilityReport = o.optString("compatibilityReport"),
+                                securityReport = o.optString("securityReport"),
+                                requiredApisAndPerms = o.optString("requiredApisAndPerms"),
+                                testReport = o.optString("testReport"),
+                                status = o.optString("status", "IN_PROGRESS"),
+                                failureReason = o.optString("failureReason"),
+                                resultFeatureId = o.optString("resultFeatureId")
+                            )
+                        )
+                        historyCount++
+                    }
+                }
+                root.optJSONArray("featureRecommendations")?.let { arr ->
+                    for (i in 0 until arr.length()) {
+                        val o = arr.getJSONObject(i)
+                        historyRepo.upsertRecommendation(
+                            FeatureRecommendationEntity(
+                                id = o.getString("id"),
+                                featureName = o.optString("featureName"),
+                                summaryWhatItDoes = o.optString("summaryWhatItDoes"),
+                                whyAuraNeedsIt = o.optString("whyAuraNeedsIt"),
+                                limitationSolved = o.optString("limitationSolved"),
+                                discoveringAgent = o.optString("discoveringAgent"),
+                                otherAgentOpinionsJson = o.optString("otherAgentOpinionsJson", "[]"),
+                                sourceLinksCsv = o.optString("sourceLinksCsv"),
+                                securityAssessment = o.optString("securityAssessment"),
+                                compatibilityAssessment = o.optString("compatibilityAssessment"),
+                                developmentEffort = o.optString("developmentEffort", "MEDIUM"),
+                                costResourceImpact = o.optString("costResourceImpact"),
+                                testRequirements = o.optString("testRequirements"),
+                                inboxStatus = o.optString("inboxStatus", "NEW"),
+                                agentFollowUpNotes = o.optString("agentFollowUpNotes"),
+                                linkedRequestId = o.optString("linkedRequestId")
+                            )
+                        )
+                        historyCount++
+                    }
+                }
+                root.optJSONArray("pendingChangeProposals")?.let { arr ->
+                    for (i in 0 until arr.length()) {
+                        val o = arr.getJSONObject(i)
+                        historyRepo.upsertProposal(
+                            PendingChangeProposalEntity(
+                                id = o.getString("id"),
+                                requestId = o.optString("requestId"),
+                                featureId = o.optString("featureId"),
+                                title = o.optString("title"),
+                                changeType = o.optString("changeType"),
+                                summary = o.optString("summary"),
+                                targetVersion = o.optString("targetVersion"),
+                                previousVersion = if (o.isNull("previousVersion")) null else o.optString("previousVersion"),
+                                versionDiff = o.optString("versionDiff"),
+                                testReport = o.optString("testReport"),
+                                securityAssessment = o.optString("securityAssessment"),
+                                requiresExplicitApproval = o.optBoolean("requiresExplicitApproval", true),
+                                approvalReason = o.optString("approvalReason"),
+                                previousStateSnapshotJson = o.optString("previousStateSnapshotJson", "{}"),
+                                status = o.optString("status", "PENDING"),
+                                modificationNotes = o.optString("modificationNotes")
+                            )
+                        )
+                        historyCount++
+                    }
+                }
+            }
+
+            BackupRestoreSummary(memCount, routineCount, workflowCount, kgCount, recipeCount, prodCount, compatCount, historyCount)
         }
     }
 

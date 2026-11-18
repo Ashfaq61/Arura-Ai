@@ -23,6 +23,7 @@ import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Hub
 import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.Science
+import androidx.compose.material.icons.filled.Person
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -37,6 +38,7 @@ import androidx.compose.material3.PrimaryScrollableTabRow
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -51,6 +53,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.aura.agents.AgentStatus
+import com.example.aura.agents.SpecialistAgent
 import com.example.aura.ui.AuraViewModel
 import com.example.aura.ui.components.StatusPill
 
@@ -58,8 +61,20 @@ import com.example.aura.ui.components.StatusPill
 @Composable
 fun AgentsAndEvolutionScreen(viewModel: AuraViewModel) {
     var subTab by remember { mutableIntStateOf(0) }
+    val agents by viewModel.agents.collectAsStateWithLifecycle()
+    val proposals by viewModel.historyController.changeProposals.collectAsStateWithLifecycle()
+    val pendingProposalsCount = proposals.count { it.status == "PENDING" }
+    var inspectedAgent by remember { mutableStateOf<SpecialistAgent?>(null) }
+
     val tabs = listOf(
-        "24 Agents & A2A",
+        "Agents (${agents.size})",
+        "Comm History",
+        "Live Activity",
+        "Add Feature",
+        "Discovery Inbox",
+        "Feature Registry",
+        if (pendingProposalsCount > 0) "Approvals ($pendingProposalsCount)" else "Approvals & Rollback",
+        "History Search",
         "Long-Horizon",
         "Skill Memory",
         "Schedules",
@@ -78,30 +93,58 @@ fun AgentsAndEvolutionScreen(viewModel: AuraViewModel) {
                 Tab(
                     selected = subTab == idx,
                     onClick = { subTab = idx },
-                    text = { Text(title, maxLines = 1) }
+                    text = { Text(title, maxLines = 1) },
+                    modifier = Modifier.testTag("agents_subtab_$idx")
                 )
             }
         }
 
         when (subTab) {
-            0 -> AgentsMeshTab(viewModel)
-            1 -> LongHorizonPlannerTab(viewModel)
-            2 -> SkillMemoryTab(viewModel)
-            3 -> ScheduledTasksTab(viewModel)
-            4 -> SelfEvolutionTab(viewModel)
-            5 -> ResearchHubTab(viewModel)
-            6 -> ToolFactoryTab(viewModel)
-            7 -> SmartRoutinesTab(viewModel)
-            8 -> VisualWorkflowBuilderTab(viewModel)
-            9 -> AutomationRecipesTab(viewModel)
-            10 -> AppCompatibilityTab(viewModel)
+            0 -> AgentsMeshTab(viewModel = viewModel, onInspectAgent = { inspectedAgent = it })
+            1 -> AgentCommHistoryTab(viewModel = viewModel, onOpenAgentProfile = { inspectedAgent = it })
+            2 -> LiveAgentActivityTab(viewModel = viewModel)
+            3 -> AddFeatureRequestTab(viewModel = viewModel)
+            4 -> FeatureDiscoveryInboxTab(viewModel = viewModel)
+            5 -> FeatureRegistryHistoryTab(viewModel = viewModel)
+            6 -> ChangeApprovalAndRollbackTab(viewModel = viewModel)
+            7 -> GlobalHistorySearchAndRetentionTab(viewModel = viewModel)
+            8 -> LongHorizonPlannerTab(viewModel)
+            9 -> SkillMemoryTab(viewModel)
+            10 -> ScheduledTasksTab(viewModel)
+            11 -> SelfEvolutionTab(viewModel)
+            12 -> ResearchHubTab(viewModel)
+            13 -> ToolFactoryTab(viewModel)
+            14 -> SmartRoutinesTab(viewModel)
+            15 -> VisualWorkflowBuilderTab(viewModel)
+            16 -> AutomationRecipesTab(viewModel)
+            17 -> AppCompatibilityTab(viewModel)
         }
+    }
+
+    inspectedAgent?.let { ag ->
+        val conversations by viewModel.historyController.conversations.collectAsStateWithLifecycle()
+        val allTasks by viewModel.tasks.collectAsStateWithLifecycle()
+        val research by viewModel.researchProjects.collectAsStateWithLifecycle()
+        val recs by viewModel.historyController.recommendations.collectAsStateWithLifecycle()
+        val reg by viewModel.historyController.registryHistory.collectAsStateWithLifecycle()
+        val reqs by viewModel.historyController.featureRequests.collectAsStateWithLifecycle()
+        val acts by viewModel.historyController.liveActivities.collectAsStateWithLifecycle()
+        val summary = remember(ag, agents, conversations, allTasks, research, recs, reg, reqs, acts) {
+            viewModel.historyController.buildProfileForAgent(ag)
+        }
+        IndividualAgentProfileDialog(
+            summary = summary,
+            onDismiss = { inspectedAgent = null }
+        )
     }
 }
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun AgentsMeshTab(viewModel: AuraViewModel) {
+private fun AgentsMeshTab(
+    viewModel: AuraViewModel,
+    onInspectAgent: (SpecialistAgent) -> Unit
+) {
     val agents by viewModel.agents.collectAsStateWithLifecycle()
     val a2aFeed by viewModel.a2aFeed.collectAsStateWithLifecycle()
     val mcpTools by viewModel.mcpTools.collectAsStateWithLifecycle()
@@ -145,7 +188,7 @@ private fun AgentsMeshTab(viewModel: AuraViewModel) {
             }
         }
 
-        items(agents, key = { it.id }) { agent ->
+        items(agents, key = { it.codeName }) { agent ->
             val accent = when (agent.status) {
                 AgentStatus.ONLINE -> MaterialTheme.colorScheme.tertiary
                 AgentStatus.ACTIVE -> MaterialTheme.colorScheme.primary
@@ -153,9 +196,12 @@ private fun AgentsMeshTab(viewModel: AuraViewModel) {
                 else -> MaterialTheme.colorScheme.secondary
             }
             Card(
+                onClick = { onInspectAgent(agent) },
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
                 border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("agent_card_${agent.codeName}")
             ) {
                 Column(modifier = Modifier.padding(14.dp)) {
                     Row(
@@ -164,10 +210,19 @@ private fun AgentsMeshTab(viewModel: AuraViewModel) {
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Text("${agent.id}. ${agent.name}", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                        if (agent.isCustom) {
+                            StatusPill(text = "CUSTOM", accent = MaterialTheme.colorScheme.secondary)
+                            Spacer(modifier = Modifier.width(4.dp))
+                        }
                         StatusPill(text = agent.status.name, accent = accent)
                     }
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(agent.responsibility, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        "Model: ${agent.preferredProvider} / ${agent.preferredModel}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary
+                    )
                     Spacer(modifier = Modifier.height(6.dp))
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         agent.capabilities.forEach { cap ->
@@ -175,11 +230,23 @@ private fun AgentsMeshTab(viewModel: AuraViewModel) {
                         }
                     }
                     Spacer(modifier = Modifier.height(6.dp))
-                    Text(
-                        text = "Task: ${agent.currentTask} • Done: ${agent.completedTasks}",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                    Row(
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = "Task: ${agent.currentTask} • Done: ${agent.completedTasks}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.weight(1f)
+                        )
+                        TextButton(onClick = { onInspectAgent(agent) }) {
+                            Icon(Icons.Filled.Person, contentDescription = null)
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Profile & History")
+                        }
+                    }
                 }
             }
         }

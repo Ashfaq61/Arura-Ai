@@ -32,9 +32,17 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         AutomationRecipeEntity::class,
         ProductivityItemEntity::class,
         SyncDeviceEntity::class,
-        CrashReportEntity::class
+        CrashReportEntity::class,
+        // Agent History & Feature Control v4 entities
+        AgentConversationEntity::class,
+        CustomAgentProfileEntity::class,
+        AgentActivityEventEntity::class,
+        FeatureRegistryHistoryEntity::class,
+        FeatureRequestEntity::class,
+        FeatureRecommendationEntity::class,
+        PendingChangeProposalEntity::class
     ],
-    version = 3,
+    version = 4,
     exportSchema = false
 )
 abstract class AuraDatabase : RoomDatabase() {
@@ -62,6 +70,15 @@ abstract class AuraDatabase : RoomDatabase() {
     abstract fun productivityDao(): ProductivityDao
     abstract fun syncDeviceDao(): SyncDeviceDao
     abstract fun crashReportDao(): CrashReportDao
+
+    // Agent History & Feature Control v4 DAOs
+    abstract fun agentConversationDao(): AgentConversationDao
+    abstract fun customAgentProfileDao(): CustomAgentProfileDao
+    abstract fun agentActivityDao(): AgentActivityDao
+    abstract fun featureRegistryHistoryDao(): FeatureRegistryHistoryDao
+    abstract fun featureRequestDao(): FeatureRequestDao
+    abstract fun featureRecommendationDao(): FeatureRecommendationDao
+    abstract fun pendingChangeProposalDao(): PendingChangeProposalDao
 
     companion object {
         @Volatile
@@ -195,6 +212,104 @@ abstract class AuraDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """CREATE TABLE IF NOT EXISTS `agent_conversations` (
+                        `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        `conversationId` TEXT NOT NULL, `sessionId` TEXT NOT NULL,
+                        `agentId` TEXT NOT NULL, `agentName` TEXT NOT NULL,
+                        `participatingAgentsCsv` TEXT NOT NULL, `channelType` TEXT NOT NULL,
+                        `topic` TEXT NOT NULL, `userOriginalRequest` TEXT NOT NULL,
+                        `qaExchangedJson` TEXT NOT NULL, `recommendationsMade` TEXT NOT NULL,
+                        `researchFindings` TEXT NOT NULL, `repositoryAndModelLinksCsv` TEXT NOT NULL,
+                        `decisionsAndReasons` TEXT NOT NULL, `proposedFeaturesOrToolsCsv` TEXT NOT NULL,
+                        `actionsPerformedCsv` TEXT NOT NULL, `testResults` TEXT NOT NULL,
+                        `finalOutcome` TEXT NOT NULL, `sensitivityRedacted` INTEGER NOT NULL,
+                        `timestamp` INTEGER NOT NULL
+                    )"""
+                )
+                db.execSQL(
+                    """CREATE TABLE IF NOT EXISTS `custom_agent_profiles` (
+                        `codeName` TEXT NOT NULL PRIMARY KEY,
+                        `numericId` INTEGER NOT NULL, `name` TEXT NOT NULL,
+                        `roleDescription` TEXT NOT NULL, `capabilitiesCsv` TEXT NOT NULL,
+                        `preferredProviderId` TEXT NOT NULL, `preferredModelId` TEXT NOT NULL,
+                        `createdFromRequestId` TEXT NOT NULL, `isCustom` INTEGER NOT NULL,
+                        `enabled` INTEGER NOT NULL, `lastActivitySummary` TEXT NOT NULL,
+                        `lastActivityAt` INTEGER NOT NULL, `createdAt` INTEGER NOT NULL
+                    )"""
+                )
+                db.execSQL(
+                    """CREATE TABLE IF NOT EXISTS `agent_activity_events` (
+                        `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        `agentName` TEXT NOT NULL, `activityType` TEXT NOT NULL,
+                        `targetAgentOrModule` TEXT NOT NULL, `summary` TEXT NOT NULL,
+                        `status` TEXT NOT NULL, `errorReason` TEXT NOT NULL,
+                        `relatedRequestId` TEXT NOT NULL, `startedAt` INTEGER NOT NULL,
+                        `completedAt` INTEGER
+                    )"""
+                )
+                db.execSQL(
+                    """CREATE TABLE IF NOT EXISTS `feature_registry_history` (
+                        `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        `featureId` TEXT NOT NULL, `featureName` TEXT NOT NULL,
+                        `description` TEXT NOT NULL, `discoverySource` TEXT NOT NULL,
+                        `sourceUrl` TEXT NOT NULL, `recommendingAgent` TEXT NOT NULL,
+                        `participatingAgentsCsv` TEXT NOT NULL, `discoveredAt` INTEGER NOT NULL,
+                        `version` TEXT NOT NULL, `previousVersion` TEXT,
+                        `changeEventType` TEXT NOT NULL, `dependencies` TEXT NOT NULL,
+                        `permissionsRequired` TEXT NOT NULL, `installationDate` INTEGER,
+                        `testResults` TEXT NOT NULL, `activationStatus` TEXT NOT NULL,
+                        `decisionReason` TEXT NOT NULL, `versionDiffSummary` TEXT NOT NULL,
+                        `rollbackSnapshotJson` TEXT NOT NULL, `timestamp` INTEGER NOT NULL
+                    )"""
+                )
+                db.execSQL(
+                    """CREATE TABLE IF NOT EXISTS `feature_requests` (
+                        `requestId` TEXT NOT NULL PRIMARY KEY,
+                        `userPrompt` TEXT NOT NULL, `requestMode` TEXT NOT NULL,
+                        `linkedSourceId` TEXT NOT NULL, `assignedAgentsCsv` TEXT NOT NULL,
+                        `currentStage` INTEGER NOT NULL, `stageName` TEXT NOT NULL,
+                        `stageHistoryJson` TEXT NOT NULL, `consultationSummary` TEXT NOT NULL,
+                        `technicalPlan` TEXT NOT NULL, `alternativesSummary` TEXT NOT NULL,
+                        `compatibilityReport` TEXT NOT NULL, `securityReport` TEXT NOT NULL,
+                        `requiredApisAndPerms` TEXT NOT NULL, `testReport` TEXT NOT NULL,
+                        `status` TEXT NOT NULL, `failureReason` TEXT NOT NULL,
+                        `resultFeatureId` TEXT NOT NULL, `createdAt` INTEGER NOT NULL,
+                        `updatedAt` INTEGER NOT NULL
+                    )"""
+                )
+                db.execSQL(
+                    """CREATE TABLE IF NOT EXISTS `feature_recommendations` (
+                        `id` TEXT NOT NULL PRIMARY KEY,
+                        `featureName` TEXT NOT NULL, `summaryWhatItDoes` TEXT NOT NULL,
+                        `whyAuraNeedsIt` TEXT NOT NULL, `limitationSolved` TEXT NOT NULL,
+                        `discoveringAgent` TEXT NOT NULL, `otherAgentOpinionsJson` TEXT NOT NULL,
+                        `sourceLinksCsv` TEXT NOT NULL, `securityAssessment` TEXT NOT NULL,
+                        `compatibilityAssessment` TEXT NOT NULL, `developmentEffort` TEXT NOT NULL,
+                        `costResourceImpact` TEXT NOT NULL, `testRequirements` TEXT NOT NULL,
+                        `inboxStatus` TEXT NOT NULL, `agentFollowUpNotes` TEXT NOT NULL,
+                        `linkedRequestId` TEXT NOT NULL, `createdAt` INTEGER NOT NULL
+                    )"""
+                )
+                db.execSQL(
+                    """CREATE TABLE IF NOT EXISTS `pending_change_proposals` (
+                        `id` TEXT NOT NULL PRIMARY KEY,
+                        `requestId` TEXT NOT NULL, `featureId` TEXT NOT NULL,
+                        `title` TEXT NOT NULL, `changeType` TEXT NOT NULL,
+                        `summary` TEXT NOT NULL, `targetVersion` TEXT NOT NULL,
+                        `previousVersion` TEXT, `versionDiff` TEXT NOT NULL,
+                        `testReport` TEXT NOT NULL, `securityAssessment` TEXT NOT NULL,
+                        `requiresExplicitApproval` INTEGER NOT NULL, `approvalReason` TEXT NOT NULL,
+                        `previousStateSnapshotJson` TEXT NOT NULL, `status` TEXT NOT NULL,
+                        `modificationNotes` TEXT NOT NULL, `createdAt` INTEGER NOT NULL,
+                        `updatedAt` INTEGER NOT NULL
+                    )"""
+                )
+            }
+        }
+
         fun getInstance(context: Context): AuraDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -202,7 +317,7 @@ abstract class AuraDatabase : RoomDatabase() {
                     AuraDatabase::class.java,
                     "aura_autonomous_db"
                 )
-                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
                     .build()
                     .also { INSTANCE = it }
             }

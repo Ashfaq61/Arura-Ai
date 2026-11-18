@@ -1,5 +1,7 @@
 package com.example.aura.agents
 
+import com.example.aura.ai.GEMINI_DEFAULT_MODEL
+import com.example.aura.memory.CustomAgentProfileEntity
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -23,7 +25,11 @@ data class SpecialistAgent(
     val currentTask: String = "Idle — ready for delegation",
     val completedTasks: Int = 0,
     val errorCount: Int = 0,
-    val avgLatencyMs: Long = 0L
+    val avgLatencyMs: Long = 0L,
+    val preferredProvider: String = "FIREBASE_GEMINI",
+    val preferredModel: String = GEMINI_DEFAULT_MODEL,
+    val isCustom: Boolean = false,
+    val lastActivityAt: Long = System.currentTimeMillis()
 )
 
 data class AgentMessage(
@@ -61,6 +67,7 @@ class AgentNetworkManager {
     val mcpTools: StateFlow<List<McpToolDescriptor>> = _mcpTools.asStateFlow()
 
     fun setAgentState(agentName: String, status: AgentStatus, taskSummary: String) {
+        val now = System.currentTimeMillis()
         _agents.value = _agents.value.map { agent ->
             if (agent.name.equals(agentName, ignoreCase = true) ||
                 agent.codeName.equals(agentName, ignoreCase = true)
@@ -68,6 +75,7 @@ class AgentNetworkManager {
                 agent.copy(
                     status = status,
                     currentTask = taskSummary,
+                    lastActivityAt = now,
                     completedTasks = if (status == AgentStatus.ONLINE && agent.status == AgentStatus.ACTIVE) {
                         agent.completedTasks + 1
                     } else agent.completedTasks,
@@ -85,6 +93,55 @@ class AgentNetworkManager {
         _agents.value = _agents.value.map {
             it.copy(status = AgentStatus.ONLINE, currentTask = "Idle — ready for delegation")
         }
+    }
+
+    fun mergeCustomProfiles(profiles: List<CustomAgentProfileEntity>) {
+        val core = buildInitial24Agents()
+        val overrides = profiles.associateBy { it.codeName }
+        val mergedCore = core.map { agent ->
+            val ov = overrides[agent.codeName]
+            if (ov != null) {
+                agent.copy(
+                    preferredProvider = ov.preferredProviderId,
+                    preferredModel = ov.preferredModelId
+                )
+            } else agent
+        }
+        val customOnly = profiles.filter { p -> p.isCustom && p.enabled && core.none { it.codeName == p.codeName } }
+            .mapIndexed { idx, p ->
+                SpecialistAgent(
+                    id = if (p.numericId > 24) p.numericId else 25 + idx,
+                    codeName = p.codeName,
+                    name = p.name,
+                    responsibility = p.roleDescription,
+                    capabilities = p.capabilitiesCsv.split(",").map { it.trim() }.filter { it.isNotEmpty() },
+                    status = AgentStatus.ONLINE,
+                    currentTask = p.lastActivitySummary,
+                    preferredProvider = p.preferredProviderId,
+                    preferredModel = p.preferredModelId,
+                    isCustom = true,
+                    lastActivityAt = p.lastActivityAt
+                )
+            }
+        _agents.value = mergedCore + customOnly
+    }
+
+    fun registerCustomAgent(profile: CustomAgentProfileEntity) {
+        val existing = _agents.value.filterNot { it.codeName == profile.codeName }
+        val nextId = (existing.maxOfOrNull { it.id } ?: 24) + 1
+        _agents.value = existing + SpecialistAgent(
+            id = if (profile.numericId > 24) profile.numericId else nextId,
+            codeName = profile.codeName,
+            name = profile.name,
+            responsibility = profile.roleDescription,
+            capabilities = profile.capabilitiesCsv.split(",").map { it.trim() }.filter { it.isNotEmpty() },
+            status = AgentStatus.ONLINE,
+            currentTask = profile.lastActivitySummary,
+            preferredProvider = profile.preferredProviderId,
+            preferredModel = profile.preferredModelId,
+            isCustom = true,
+            lastActivityAt = profile.lastActivityAt
+        )
     }
 
     fun sendA2aMessage(

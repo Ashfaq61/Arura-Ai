@@ -12,6 +12,9 @@ import com.example.aura.agents.AgentStatus
 import com.example.aura.agents.McpToolDescriptor
 import com.example.aura.ai.MultiProviderRouter
 import com.example.aura.automation.DeviceControlEngine
+import com.example.aura.evolution.SelfHealingEngine
+import com.example.aura.history.AgentHistoryRecorder
+import com.example.aura.history.QaExchangeTurn
 import com.example.aura.memory.AuraDatabase
 import com.example.aura.memory.EvolutionCycleEntity
 import com.example.aura.memory.MarketplaceToolEntity
@@ -30,6 +33,7 @@ class ToolFactoryAndEvolutionEngine(
     private val permissionGuard: PermissionGuard,
     private val deviceControl: DeviceControlEngine
 ) {
+    @Volatile var historyRecorder: AgentHistoryRecorder? = null
     /**
      * Autonomous Tool Factory:
      * 1. Identifies missing capability.
@@ -137,6 +141,22 @@ class ToolFactoryAndEvolutionEngine(
         )
         agentNetwork.setAgentState("Tool Factory Agent", AgentStatus.ONLINE, "Synthesized '$toolName' (awaiting enable)")
         agentNetwork.setAgentState("Security Agent", AgentStatus.ONLINE, "Idle")
+        historyRecorder?.recordConversation(
+            agentId = "19",
+            agentName = "Tool Factory Agent",
+            participatingAgents = listOf("Tool Discovery Agent", "Tool Factory Agent", "Security Agent"),
+            channelType = "RD_AGENT",
+            topic = "Tool Synthesis: $toolName",
+            userOriginalRequest = capabilityRequest,
+            qaTurns = listOf(
+                QaExchangeTurn("Tool Discovery Agent", "Tool Factory Agent", "Synthesize MCP spec for $category", description),
+                QaExchangeTurn("Tool Factory Agent", "Security Agent", "Static scan permissions ($perms)", scanMessage)
+            ),
+            proposedTools = listOf(toolName),
+            decisionsAndReasons = "Created as INSTALLED_DISABLED pending explicit activation",
+            testResults = "PASSED: $testSummary",
+            finalOutcome = "SYNTHESIZED_DISABLED"
+        )
         return Result.success(entity)
     }
 
@@ -193,6 +213,22 @@ class ToolFactoryAndEvolutionEngine(
             "Main Brain / Orchestrator Agent",
             "PROGRESS",
             "Evolution cycle #$id proposed: $candidateDesc"
+        )
+        historyRecorder?.recordConversation(
+            agentId = "20",
+            agentName = "Self-Upgrade Agent",
+            participatingAgents = listOf("Self-Upgrade Agent", "GitHub Research Agent", "Hugging Face Research Agent", "Security Agent", "Performance Optimization Agent"),
+            channelType = "TOOL_DISCOVERY",
+            topic = "Evolution Cycle #$id ($focusTopic)",
+            userOriginalRequest = focusTopic,
+            qaTurns = listOf(
+                QaExchangeTurn("Self-Upgrade Agent", "GitHub Research Agent", "Find candidate upgrades for '$focusTopic'", candidateDesc),
+                QaExchangeTurn("Security Agent", "Performance Optimization Agent", "Audit license & RAM fit", "$staticCheck | $benchmark")
+            ),
+            researchFindings = "Discovered ${discovered.size} upstream candidates.",
+            links = discovered.take(3).map { it.url },
+            decisionsAndReasons = "Logged proposal #${id} (DISCOVERED_ONLY / PROPOSED until approved).",
+            finalOutcome = "PROPOSED"
         )
         agentNetwork.setAgentState("Self-Upgrade Agent", AgentStatus.ONLINE, "Idle")
         agentNetwork.setAgentState("GitHub Research Agent", AgentStatus.ONLINE, "Idle")

@@ -3,6 +3,7 @@ package com.example.aura.memory
 import android.content.Context
 import android.content.Intent
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -54,6 +55,7 @@ class MemoryRepository(private val db: AuraDatabase) {
 
     suspend fun upsertTool(tool: MarketplaceToolEntity) = db.marketplaceDao().upsertTool(tool)
     suspend fun getTool(id: String): MarketplaceToolEntity? = db.marketplaceDao().getToolById(id)
+    suspend fun getAllToolsOnce(): List<MarketplaceToolEntity> = db.marketplaceDao().observeTools().first()
     suspend fun deleteTool(id: String) = db.marketplaceDao().deleteTool(id)
 
     suspend fun upsertResearchProjects(projects: List<ResearchProjectEntity>) = db.researchDao().upsertProjects(projects)

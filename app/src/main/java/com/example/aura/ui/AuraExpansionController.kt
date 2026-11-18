@@ -26,6 +26,7 @@ import com.example.aura.github.GitHubConfig
 import com.example.aura.github.GitHubSelfUpdateClient
 import com.example.aura.knowledge.KnowledgeGraphEngine
 import com.example.aura.memory.AdvancedRepository
+import com.example.aura.memory.AgentHistoryRepository
 import com.example.aura.memory.AppCompatibilityProfileEntity
 import com.example.aura.memory.AuraDatabase
 import com.example.aura.memory.AuraPreferences
@@ -113,7 +114,7 @@ class AuraExpansionController(
     val offlineEmergency = OfflineEmergencyEngine(app, deviceControl)
     val knowledgeGraph = KnowledgeGraphEngine(advancedRepo, memoryRepository)
     val visualWorkflowEngine = VisualWorkflowEngine(advancedRepo, deviceControl, permissionGuard)
-    val backupManager = EncryptedBackupManager(memoryRepository, advancedRepo)
+    val backupManager = EncryptedBackupManager(memoryRepository, advancedRepo, AgentHistoryRepository(db))
     val performanceEngine = AgentPerformanceEngine()
     val compatEngine = AppCompatibilityEngine(app, advancedRepo, memoryRepository)
     val gateway = BackendServiceGateway(app)

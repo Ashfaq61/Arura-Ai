@@ -9,6 +9,10 @@ import com.example.aura.automation.DeviceControlEngine
 import com.example.aura.calls.PhoneCallAndMessagingManager
 import com.example.aura.evolution.SelfHealingEngine
 import com.example.aura.evolution.ToolFactoryAndEvolutionEngine
+import com.example.aura.history.AgentHistoryRecorder
+import com.example.aura.history.FeatureControlPipelineEngine
+import com.example.aura.history.FeatureVoiceCommandParser
+import com.example.aura.history.QaExchangeTurn
 import com.example.aura.memory.ApprovalRequestEntity
 import com.example.aura.memory.AuraPreferences
 import com.example.aura.memory.MemoryEntryEntity
@@ -87,6 +91,10 @@ class AuraOrchestrator(
 
     val lastDispatchPlan: StateFlow<TaskDispatchPlan?> = taskDispatcher.lastDispatchPlan
 
+    @Volatile var historyRecorder: AgentHistoryRecorder? = null
+    @Volatile var featurePipeline: FeatureControlPipelineEngine? = null
+    @Volatile var onFeatureInboxLookupTopId: (suspend () -> String?)? = null
+
     suspend fun processInstruction(
         instruction: String,
         prefs: AuraPreferences,
@@ -128,6 +136,49 @@ class AuraOrchestrator(
                     agentsUsed = listOf("Security Agent")
                 )
             )
+            return
+        }
+
+        // Intercept Hinglish / English feature & tool creation voice/text commands (Req #4)
+        val parsedFeatureCmd = FeatureVoiceCommandParser.parse(trimmed)
+        val pipeline = featurePipeline
+        if (parsedFeatureCmd != null && pipeline != null) {
+            _currentLoopPhase.value = "FEATURE_PIPELINE"
+            val linkedRecId = if (parsedFeatureCmd.prefersRecommendedInboxItem) {
+                onFeatureInboxLookupTopId?.invoke().orEmpty()
+            } else ""
+            val req = pipeline.submitFeatureRequest(
+                userPrompt = parsedFeatureCmd.prompt,
+                requestMode = parsedFeatureCmd.requestMode,
+                linkedSourceId = linkedRecId,
+                prefs = prefs
+            )
+            val replyText = buildString {
+                appendLine("Feature Request ${req.requestId} [${req.status}] (Stage ${req.currentStage}/16: ${req.stageName})")
+                if (req.assignedAgentsCsv.isNotBlank()) appendLine("Agents consulted: ${req.assignedAgentsCsv}")
+                if (req.technicalPlan.isNotBlank()) appendLine("Plan: ${req.technicalPlan.take(220)}")
+                if (req.testReport.isNotBlank()) appendLine("Verification: ${req.testReport}")
+                if (req.failureReason.isNotBlank()) appendLine("Failure Reason: ${req.failureReason}")
+                if (req.status == "AWAITING_APPROVAL") {
+                    append("Open Agents -> Approval & Rollback Center to review diff/tests and Approve.")
+                }
+            }.trim()
+            appendMessage(
+                ChatTurn(
+                    role = "AURA",
+                    text = replyText,
+                    language = lang,
+                    providerLabel = "FeaturePipeline",
+                    modelLabel = req.requestId,
+                    agentsUsed = req.assignedAgentsCsv.split(",").map { it.trim() }.filter { it.isNotEmpty() },
+                    loopPhaseTrace = listOf("REQUEST_SAVED", "CONSULTED", "VERIFIED", req.status)
+                )
+            )
+            if (req.status == "COMPLETED_ACTIVATED" || req.status == "AWAITING_APPROVAL") {
+                onSpeakReply(replyText, lang)
+            }
+            _currentLoopPhase.value = "IDLE"
+            agentNetwork.resetAllToOnline()
             return
         }
 
@@ -206,6 +257,19 @@ class AuraOrchestrator(
             }
         } else null
 
+        val recorder = historyRecorder
+        val liveActivityId = recorder?.startLiveActivity(
+            agentName = assignedAgents.firstOrNull() ?: "Main Brain / Orchestrator Agent",
+            activityType = when (plan.intentCategory) {
+                TaskIntentCategory.RESEARCH -> "RESEARCHING"
+                TaskIntentCategory.TOOL_FACTORY -> "DEVELOPING"
+                else -> "TALKING"
+            },
+            targetAgentOrModule = plan.intentCategory.name,
+            summary = "Processing: ${recorder.sanitizeText(trimmed.take(50), prefs)}",
+            prefs = prefs
+        )
+
         val result = try {
             taskDispatcher.dispatch(request, plan) { deltaText, provider, model ->
                 if (streamingTurnId != null) {
@@ -219,6 +283,9 @@ class AuraOrchestrator(
                 }
             }
         } catch (e: CancellationException) {
+            if (recorder != null && liveActivityId != null) {
+                recorder.completeLiveActivity(liveActivityId, "FAILED", "Task cancelled", "Cancelled by user", prefs)
+            }
             throw e
         } catch (e: Exception) {
             Log.e(TAG, "TaskDispatcher execution failed", e)
@@ -249,6 +316,23 @@ class AuraOrchestrator(
                         )
                     )
                 }
+                if (recorder != null && liveActivityId != null) {
+                    recorder.completeLiveActivity(liveActivityId, "FAILED", "Blocked by PolicyGuard", result.responseText, prefs)
+                }
+                recorder?.recordConversation(
+                    agentId = "14",
+                    agentName = "Security Agent",
+                    participatingAgents = assignedAgents + "Security Agent",
+                    channelType = "BRAIN_TO_AGENT",
+                    topic = "Policy Gate: ${plan.safetyActionType}",
+                    userOriginalRequest = trimmed,
+                    qaTurns = listOf(QaExchangeTurn("Main Brain / Orchestrator Agent", "Security Agent", "Permit ${plan.safetyActionType}?", result.responseText)),
+                    decisionsAndReasons = result.responseText,
+                    actionsPerformed = combinedTrace,
+                    testResults = "Policy block enforced",
+                    finalOutcome = "BLOCKED",
+                    prefs = prefs
+                )
                 finishTask(taskId, assignedAgents, stepsList, "FAILED", result.responseText, startTime)
                 _currentLoopPhase.value = "IDLE"
                 agentNetwork.resetAllToOnline()
@@ -269,6 +353,23 @@ class AuraOrchestrator(
                         )
                     )
                 }
+                if (recorder != null && liveActivityId != null) {
+                    recorder.completeLiveActivity(liveActivityId, "PENDING_APPROVAL", "Level 3 approval required", prefs = prefs)
+                }
+                recorder?.recordConversation(
+                    agentId = "14",
+                    agentName = assignedAgents.firstOrNull() ?: "Security Agent",
+                    participatingAgents = assignedAgents + "Security Agent",
+                    channelType = "BRAIN_TO_AGENT",
+                    topic = "Approval Gate: ${plan.safetyActionType}",
+                    userOriginalRequest = trimmed,
+                    qaTurns = listOf(QaExchangeTurn("Main Brain / Orchestrator Agent", "Security Agent", "Validate safety level", result.responseText)),
+                    decisionsAndReasons = "Level 3 confirmation required #${result.pendingApprovalId}",
+                    actionsPerformed = combinedTrace,
+                    testResults = "Pending user confirmation",
+                    finalOutcome = "AWAITING_APPROVAL",
+                    prefs = prefs
+                )
                 finishTask(taskId, assignedAgents, stepsList, "AWAITING_APPROVAL", "Waiting user confirmation #${result.pendingApprovalId}", startTime)
                 _currentLoopPhase.value = "IDLE"
                 agentNetwork.resetAllToOnline()
@@ -303,6 +404,42 @@ class AuraOrchestrator(
         }
 
         phase("VERIFY & LEARN")
+        if (recorder != null && liveActivityId != null) {
+            recorder.completeLiveActivity(
+                liveActivityId,
+                if (result.success) "COMPLETED" else "FAILED",
+                "${plan.intentCategory.name}: ${if (result.success) "Succeeded" else "Completed with note"}",
+                errorReason = if (result.success) "" else result.responseText.take(180),
+                prefs = prefs
+            )
+        }
+        recorder?.recordConversation(
+            agentId = "1",
+            agentName = assignedAgents.firstOrNull() ?: "Main Brain / Orchestrator Agent",
+            participatingAgents = assignedAgents,
+            channelType = when (plan.intentCategory) {
+                TaskIntentCategory.RESEARCH -> "TOOL_DISCOVERY"
+                TaskIntentCategory.TOOL_FACTORY -> "RD_AGENT"
+                TaskIntentCategory.CONVERSATIONAL_AI -> "EXTERNAL_PROVIDER"
+                else -> "BRAIN_TO_AGENT"
+            },
+            topic = "${plan.intentCategory.name}: ${plan.intentCode}",
+            userOriginalRequest = trimmed,
+            qaTurns = listOf(
+                QaExchangeTurn(
+                    speaker = "Main Brain / Orchestrator Agent",
+                    target = assignedAgents.getOrElse(1) { assignedAgents.firstOrNull() ?: "Provider" },
+                    question = plan.rationale.ifBlank { trimmed },
+                    answer = result.responseText.take(400)
+                )
+            ),
+            decisionsAndReasons = "Routed via ${result.providerLabel.ifBlank { plan.intentCategory.name }} (${result.modelLabel})",
+            actionsPerformed = combinedTrace,
+            testResults = if (result.success) "Execution & output check PASSED" else "Returned note/error",
+            finalOutcome = if (result.success) "SUCCESS" else "COMPLETED_WITH_NOTE",
+            prefs = prefs
+        )
+
         if (prefs.memoryEnabled && !prefs.privateMode && result.responseText.isNotBlank() && plan.intentCode != "MEMORY") {
             val sensitiveHint = trimmed.contains("password", true) || trimmed.contains("pin", true) || trimmed.contains("cnic", true)
             if (!sensitiveHint) {

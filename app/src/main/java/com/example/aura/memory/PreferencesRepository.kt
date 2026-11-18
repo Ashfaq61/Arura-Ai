@@ -57,6 +57,9 @@ data class AuraPreferences(
     val localDeviceId: String = "",
     val deviceDisplayName: String = "Android Device",
     val syncConflictStrategy: String = "LAST_WRITE_WINS", // LAST_WRITE_WINS, KEEP_LOCAL, KEEP_REMOTE, MERGE_COLLECTIONS
+    val historyRetentionDays: Int = 90,
+    val maxHistoryEntries: Int = 1000,
+    val recordSensitiveChatDetails: Boolean = false,
     val autonomyPolicy: AutonomyPolicy = AutonomyPolicy()
 )
 
@@ -90,6 +93,9 @@ class PreferencesRepository(private val context: Context) {
         val LOCAL_DEVICE_ID = stringPreferencesKey("local_device_id")
         val DEVICE_DISPLAY_NAME = stringPreferencesKey("device_display_name")
         val SYNC_CONFLICT_STRATEGY = stringPreferencesKey("sync_conflict_strategy")
+        val HISTORY_RETENTION_DAYS = intPreferencesKey("history_retention_days")
+        val MAX_HISTORY_ENTRIES = intPreferencesKey("max_history_entries")
+        val RECORD_SENSITIVE_CHAT = booleanPreferencesKey("record_sensitive_chat_details")
 
         val AUTO_MAX_STEPS = intPreferencesKey("auto_max_steps")
         val AUTO_MAX_RUNS_HOUR = intPreferencesKey("auto_max_runs_hour")
@@ -134,6 +140,9 @@ class PreferencesRepository(private val context: Context) {
             localDeviceId = prefs[Keys.LOCAL_DEVICE_ID] ?: "",
             deviceDisplayName = prefs[Keys.DEVICE_DISPLAY_NAME] ?: android.os.Build.MODEL.ifBlank { "Android Device" },
             syncConflictStrategy = prefs[Keys.SYNC_CONFLICT_STRATEGY] ?: "LAST_WRITE_WINS",
+            historyRetentionDays = prefs[Keys.HISTORY_RETENTION_DAYS] ?: 90,
+            maxHistoryEntries = prefs[Keys.MAX_HISTORY_ENTRIES] ?: 1000,
+            recordSensitiveChatDetails = prefs[Keys.RECORD_SENSITIVE_CHAT] ?: false,
             autonomyPolicy = AutonomyPolicy(
                 maxAutonomousSteps = prefs[Keys.AUTO_MAX_STEPS] ?: 25,
                 maxScheduledRunsPerHour = prefs[Keys.AUTO_MAX_RUNS_HOUR] ?: 6,
@@ -222,6 +231,14 @@ class PreferencesRepository(private val context: Context) {
             it[Keys.CONFIRM_GITHUB] = policy.confirmBeforeGitHubPush
             it[Keys.CONFIRM_CALENDAR] = policy.confirmBeforeCalendarWrite
             it[Keys.CONFIRM_SYNC] = policy.confirmBeforeCloudSync
+        }
+    }
+
+    suspend fun setHistoryRetentionPolicy(days: Int, maxEntries: Int, recordSensitive: Boolean) {
+        context.auraPrefsDataStore.edit {
+            it[Keys.HISTORY_RETENTION_DAYS] = days.coerceIn(1, 3650)
+            it[Keys.MAX_HISTORY_ENTRIES] = maxEntries.coerceIn(50, 10000)
+            it[Keys.RECORD_SENSITIVE_CHAT] = recordSensitive
         }
     }
 }
