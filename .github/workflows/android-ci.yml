@@ -41,22 +41,27 @@ jobs:
 
       - name: Prepare debug keystore
         working-directory: ${{ env.PROJECT_DIR }}
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
-          if [ ! -f ~/.android/debug.keystore ]; then
-            mkdir -p ~/.android
+          mkdir -p ~/.android
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            printf '%s' "$KEYSTORE_BASE64" | tr -d '[:space:]' | base64 -d > ~/.android/debug.keystore
+          elif [ ! -f ~/.android/debug.keystore ]; then
             keytool -genkeypair -v \
               -keystore ~/.android/debug.keystore \
-              -storepass android \
-              -alias androiddebugkey \
-              -keypass android \
+              -storepass "${KEYSTORE_PASSWORD:-android}" \
+              -alias "${KEY_ALIAS:-androiddebugkey}" \
+              -keypass "${KEY_PASSWORD:-android}" \
               -keyalg RSA \
               -keysize 2048 \
               -validity 10000 \
               -dname "CN=Android Debug,O=Android,C=US"
           fi
-          if [ ! -f debug.keystore ]; then
-            cp ~/.android/debug.keystore debug.keystore
-          fi
+          cp -f ~/.android/debug.keystore debug.keystore
 
       - name: Generate Gradle wrapper
         working-directory: ${{ env.PROJECT_DIR }}
@@ -81,6 +86,10 @@ jobs:
 
       - name: Build Debug APK
         working-directory: ${{ env.PROJECT_DIR }}
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: ./gradlew assembleDebug --stacktrace
 
       - name: Build Release APK
