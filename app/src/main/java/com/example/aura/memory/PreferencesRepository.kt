@@ -11,8 +11,22 @@ import com.example.aura.ai.GEMINI_DEFAULT_MODEL
 import com.example.ui.theme.AuraThemeMode
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
+import java.util.UUID
 
 private val Context.auraPrefsDataStore by preferencesDataStore(name = "aura_settings_prefs")
+
+data class AutonomyPolicy(
+    val maxAutonomousSteps: Int = 25,
+    val maxScheduledRunsPerHour: Int = 6,
+    val scheduledTasksPaused: Boolean = false,
+    val externalApiMasterEnabled: Boolean = true,
+    val confirmBeforeMessages: Boolean = true,
+    val confirmBeforeCalls: Boolean = true,
+    val confirmBeforeAppInstalls: Boolean = true,
+    val confirmBeforeGitHubPush: Boolean = true,
+    val confirmBeforeCalendarWrite: Boolean = true,
+    val confirmBeforeCloudSync: Boolean = true
+)
 
 data class AuraPreferences(
     val privateMode: Boolean = false,
@@ -25,14 +39,25 @@ data class AuraPreferences(
     val backgroundEvolutionEnabled: Boolean = true,
     val offlineFallbackEnabled: Boolean = true,
     val autoFallbackProviders: Boolean = true,
-    // Addendum privacy & budget policies
+    // Privacy & budget policies
     val intelligenceMode: String = "HYBRID", // "LOCAL_ONLY", "CLOUD_ONLY", "HYBRID"
     val freeOnlyMode: Boolean = true,
     val dailyBudgetUsd: Double = 1.0,
     val dailyTokenLimit: Int = 150_000,
     val redactSensitiveData: Boolean = true,
     val minimizeScreenSharing: Boolean = true,
-    val dataRetentionDays: Int = 30
+    val dataRetentionDays: Int = 30,
+    // Expansion Capabilities (#1, #7, #12, #16, #18, #19)
+    val wakeWordEnabled: Boolean = false,
+    val wakePhrase: String = "Hey AURA",
+    val wakeBatterySaver: Boolean = true,
+    val offlineEmergencyMode: Boolean = false,
+    val forceUrduRtlPreview: Boolean = false,
+    val cloudCompanionUrl: String = "",
+    val localDeviceId: String = "",
+    val deviceDisplayName: String = "Android Device",
+    val syncConflictStrategy: String = "LAST_WRITE_WINS", // LAST_WRITE_WINS, KEEP_LOCAL, KEEP_REMOTE, MERGE_COLLECTIONS
+    val autonomyPolicy: AutonomyPolicy = AutonomyPolicy()
 )
 
 class PreferencesRepository(private val context: Context) {
@@ -55,6 +80,27 @@ class PreferencesRepository(private val context: Context) {
         val REDACT_SENSITIVE = booleanPreferencesKey("redact_sensitive")
         val MINIMIZE_SCREEN = booleanPreferencesKey("minimize_screen")
         val RETENTION_DAYS = intPreferencesKey("retention_days")
+
+        val WAKE_WORD_ENABLED = booleanPreferencesKey("wake_word_enabled")
+        val WAKE_PHRASE = stringPreferencesKey("wake_phrase")
+        val WAKE_BATTERY_SAVER = booleanPreferencesKey("wake_battery_saver")
+        val OFFLINE_EMERGENCY = booleanPreferencesKey("offline_emergency_mode")
+        val FORCE_URDU_RTL = booleanPreferencesKey("force_urdu_rtl_preview")
+        val CLOUD_COMPANION_URL = stringPreferencesKey("cloud_companion_url")
+        val LOCAL_DEVICE_ID = stringPreferencesKey("local_device_id")
+        val DEVICE_DISPLAY_NAME = stringPreferencesKey("device_display_name")
+        val SYNC_CONFLICT_STRATEGY = stringPreferencesKey("sync_conflict_strategy")
+
+        val AUTO_MAX_STEPS = intPreferencesKey("auto_max_steps")
+        val AUTO_MAX_RUNS_HOUR = intPreferencesKey("auto_max_runs_hour")
+        val AUTO_SCHEDULES_PAUSED = booleanPreferencesKey("auto_schedules_paused")
+        val AUTO_EXTERNAL_API = booleanPreferencesKey("auto_external_api")
+        val CONFIRM_MESSAGES = booleanPreferencesKey("confirm_messages")
+        val CONFIRM_CALLS = booleanPreferencesKey("confirm_calls")
+        val CONFIRM_INSTALLS = booleanPreferencesKey("confirm_installs")
+        val CONFIRM_GITHUB = booleanPreferencesKey("confirm_github")
+        val CONFIRM_CALENDAR = booleanPreferencesKey("confirm_calendar")
+        val CONFIRM_SYNC = booleanPreferencesKey("confirm_sync")
     }
 
     val preferences: Flow<AuraPreferences> = context.auraPrefsDataStore.data.map { prefs ->
@@ -78,8 +124,44 @@ class PreferencesRepository(private val context: Context) {
             dailyTokenLimit = prefs[Keys.DAILY_TOKEN_LIMIT] ?: 150_000,
             redactSensitiveData = prefs[Keys.REDACT_SENSITIVE] ?: true,
             minimizeScreenSharing = prefs[Keys.MINIMIZE_SCREEN] ?: true,
-            dataRetentionDays = prefs[Keys.RETENTION_DAYS] ?: 30
+            dataRetentionDays = prefs[Keys.RETENTION_DAYS] ?: 30,
+            wakeWordEnabled = prefs[Keys.WAKE_WORD_ENABLED] ?: false,
+            wakePhrase = prefs[Keys.WAKE_PHRASE] ?: "Hey AURA",
+            wakeBatterySaver = prefs[Keys.WAKE_BATTERY_SAVER] ?: true,
+            offlineEmergencyMode = prefs[Keys.OFFLINE_EMERGENCY] ?: false,
+            forceUrduRtlPreview = prefs[Keys.FORCE_URDU_RTL] ?: false,
+            cloudCompanionUrl = prefs[Keys.CLOUD_COMPANION_URL] ?: "",
+            localDeviceId = prefs[Keys.LOCAL_DEVICE_ID] ?: "",
+            deviceDisplayName = prefs[Keys.DEVICE_DISPLAY_NAME] ?: android.os.Build.MODEL.ifBlank { "Android Device" },
+            syncConflictStrategy = prefs[Keys.SYNC_CONFLICT_STRATEGY] ?: "LAST_WRITE_WINS",
+            autonomyPolicy = AutonomyPolicy(
+                maxAutonomousSteps = prefs[Keys.AUTO_MAX_STEPS] ?: 25,
+                maxScheduledRunsPerHour = prefs[Keys.AUTO_MAX_RUNS_HOUR] ?: 6,
+                scheduledTasksPaused = prefs[Keys.AUTO_SCHEDULES_PAUSED] ?: false,
+                externalApiMasterEnabled = prefs[Keys.AUTO_EXTERNAL_API] ?: true,
+                confirmBeforeMessages = prefs[Keys.CONFIRM_MESSAGES] ?: true,
+                confirmBeforeCalls = prefs[Keys.CONFIRM_CALLS] ?: true,
+                confirmBeforeAppInstalls = prefs[Keys.CONFIRM_INSTALLS] ?: true,
+                confirmBeforeGitHubPush = prefs[Keys.CONFIRM_GITHUB] ?: true,
+                confirmBeforeCalendarWrite = prefs[Keys.CONFIRM_CALENDAR] ?: true,
+                confirmBeforeCloudSync = prefs[Keys.CONFIRM_SYNC] ?: true
+            )
         )
+    }
+
+    suspend fun ensureLocalDeviceId(): String {
+        var existing = ""
+        context.auraPrefsDataStore.edit { prefs ->
+            val current = prefs[Keys.LOCAL_DEVICE_ID]
+            if (current.isNullOrBlank()) {
+                val created = "aura-dev-${UUID.randomUUID().toString().take(8)}"
+                prefs[Keys.LOCAL_DEVICE_ID] = created
+                existing = created
+            } else {
+                existing = current
+            }
+        }
+        return existing
     }
 
     suspend fun setPrivateMode(enabled: Boolean) { context.auraPrefsDataStore.edit { it[Keys.PRIVATE_MODE] = enabled } }
@@ -103,4 +185,43 @@ class PreferencesRepository(private val context: Context) {
     suspend fun setRedactSensitiveData(enabled: Boolean) { context.auraPrefsDataStore.edit { it[Keys.REDACT_SENSITIVE] = enabled } }
     suspend fun setMinimizeScreenSharing(enabled: Boolean) { context.auraPrefsDataStore.edit { it[Keys.MINIMIZE_SCREEN] = enabled } }
     suspend fun setDataRetentionDays(days: Int) { context.auraPrefsDataStore.edit { it[Keys.RETENTION_DAYS] = days } }
+
+    suspend fun setWakeWordConfig(enabled: Boolean, phrase: String, batterySaver: Boolean) {
+        context.auraPrefsDataStore.edit {
+            it[Keys.WAKE_WORD_ENABLED] = enabled
+            it[Keys.WAKE_PHRASE] = phrase.trim().ifBlank { "Hey AURA" }
+            it[Keys.WAKE_BATTERY_SAVER] = batterySaver
+        }
+    }
+
+    suspend fun setOfflineEmergencyMode(enabled: Boolean) {
+        context.auraPrefsDataStore.edit { it[Keys.OFFLINE_EMERGENCY] = enabled }
+    }
+
+    suspend fun setForceUrduRtlPreview(enabled: Boolean) {
+        context.auraPrefsDataStore.edit { it[Keys.FORCE_URDU_RTL] = enabled }
+    }
+
+    suspend fun setCloudCompanionConfig(url: String, deviceDisplayName: String, conflictStrategy: String) {
+        context.auraPrefsDataStore.edit {
+            it[Keys.CLOUD_COMPANION_URL] = url.trim()
+            it[Keys.DEVICE_DISPLAY_NAME] = deviceDisplayName.trim().ifBlank { "Android Device" }
+            it[Keys.SYNC_CONFLICT_STRATEGY] = conflictStrategy
+        }
+    }
+
+    suspend fun updateAutonomyPolicy(policy: AutonomyPolicy) {
+        context.auraPrefsDataStore.edit {
+            it[Keys.AUTO_MAX_STEPS] = policy.maxAutonomousSteps.coerceIn(1, 100)
+            it[Keys.AUTO_MAX_RUNS_HOUR] = policy.maxScheduledRunsPerHour.coerceIn(1, 60)
+            it[Keys.AUTO_SCHEDULES_PAUSED] = policy.scheduledTasksPaused
+            it[Keys.AUTO_EXTERNAL_API] = policy.externalApiMasterEnabled
+            it[Keys.CONFIRM_MESSAGES] = policy.confirmBeforeMessages
+            it[Keys.CONFIRM_CALLS] = policy.confirmBeforeCalls
+            it[Keys.CONFIRM_INSTALLS] = policy.confirmBeforeAppInstalls
+            it[Keys.CONFIRM_GITHUB] = policy.confirmBeforeGitHubPush
+            it[Keys.CONFIRM_CALENDAR] = policy.confirmBeforeCalendarWrite
+            it[Keys.CONFIRM_SYNC] = policy.confirmBeforeCloudSync
+        }
+    }
 }

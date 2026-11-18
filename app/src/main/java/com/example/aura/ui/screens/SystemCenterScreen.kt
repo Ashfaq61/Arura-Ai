@@ -82,7 +82,18 @@ import com.example.ui.theme.AuraThemeMode
 fun SystemCenterScreen(viewModel: AuraViewModel) {
     var subTab by remember { mutableIntStateOf(0) }
     val requestedSubTab by viewModel.requestedSystemSubTab.collectAsStateWithLifecycle()
-    val tabs = listOf("Marketplace", "Memory", "Security", "API, Cost & Voices", "Observability & Bench", "Audit & Info")
+    val tabs = listOf(
+        "Marketplace",
+        "Memory",
+        "Security",
+        "API, Cost & Voices",
+        "Observability & Bench",
+        "Audit & Info",
+        "Autonomy & Perms",
+        "Backup & Sync",
+        "Perf & Diag",
+        "Lang QA & Release"
+    )
 
     LaunchedEffect(requestedSubTab) {
         val target = requestedSubTab ?: return@LaunchedEffect
@@ -109,6 +120,10 @@ fun SystemCenterScreen(viewModel: AuraViewModel) {
             3 -> ApiAndVoiceSettingsTab(viewModel)
             4 -> BenchmarkAndObservabilityTab(viewModel)
             5 -> FeatureAuditAndDiagnosticsTab(viewModel)
+            6 -> AutonomyAndPermissionsTab(viewModel)
+            7 -> BackupAndMultiDeviceSyncTab(viewModel)
+            8 -> PerformanceAndDiagnosticsTab(viewModel)
+            9 -> LanguageQaAndReleaseTab(viewModel)
         }
     }
 }
@@ -840,6 +855,14 @@ private fun ApiAndVoiceSettingsTab(viewModel: AuraViewModel) {
                     Text(engineNote, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
                 }
             }
+        }
+
+        // GitHub Auto-Build Settings & Self-Update
+        item {
+            GitHubSettingsCard(viewModel)
+        }
+        item {
+            GitHubAutoBuildAndUpdateCard(viewModel)
         }
 
         // Theme Selector

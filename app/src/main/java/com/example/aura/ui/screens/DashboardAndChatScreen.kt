@@ -53,6 +53,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -104,6 +105,8 @@ fun CoreDashboardScreen(
     val continuousVoice by viewModel.continuousVoice.collectAsStateWithLifecycle()
     val routedInfo by viewModel.lastRoutedProviderInfo.collectAsStateWithLifecycle()
     val activeVoiceIndicator by viewModel.activeVoiceIndicator.collectAsStateWithLifecycle()
+    val wakeState by viewModel.expansion.wakeWordState.collectAsStateWithLifecycle()
+    var wakePhraseDraft by remember(prefs.wakePhrase) { mutableStateOf(prefs.wakePhrase) }
 
     val micPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -216,6 +219,122 @@ fun CoreDashboardScreen(
                             text = "English • اردو • Roman Urdu Autonomous Assistant\nRoute: $routedInfo",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+        }
+
+        // Wake Word Engine & Offline Quick Controls
+        item {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Row(
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Wake Word & Offline Controls", style = MaterialTheme.typography.titleMedium)
+                            Text(
+                                text = "Wake detections: ${wakeState.detectionCount} • ${wakeState.statusMessage}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        StatusPill(
+                            text = if (wakeState.micIndicatorActive) "MIC LIVE" else "MIC STANDBY",
+                            accent = if (wakeState.micIndicatorActive) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.secondary,
+                            modifier = Modifier.testTag("wake_mic_indicator_pill")
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Row(
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Hands-free \"${prefs.wakePhrase}\" Detection", style = MaterialTheme.typography.bodyMedium)
+                        Switch(
+                            checked = prefs.wakeWordEnabled,
+                            onCheckedChange = { enabled ->
+                                if (enabled && ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                                    micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                } else {
+                                    viewModel.expansion.configureWakeWord(enabled, wakePhraseDraft, wakeState.sensitivity, prefs.wakeBatterySaver)
+                                }
+                            },
+                            modifier = Modifier.testTag("wake_word_switch")
+                        )
+                    }
+                    Row(
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Battery-Saver Gate (Skip <20%)", style = MaterialTheme.typography.bodySmall)
+                        Switch(
+                            checked = prefs.wakeBatterySaver,
+                            onCheckedChange = { bs ->
+                                viewModel.expansion.configureWakeWord(prefs.wakeWordEnabled, wakePhraseDraft, wakeState.sensitivity, bs)
+                            },
+                            modifier = Modifier.testTag("wake_battery_saver_switch")
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        OutlinedTextField(
+                            value = wakePhraseDraft,
+                            onValueChange = { wakePhraseDraft = it },
+                            label = { Text("Wake Phrase") },
+                            singleLine = true,
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("wake_phrase_input")
+                        )
+                        OutlinedButton(
+                            onClick = {
+                                viewModel.expansion.configureWakeWord(prefs.wakeWordEnabled, wakePhraseDraft, wakeState.sensitivity, prefs.wakeBatterySaver)
+                            },
+                            modifier = Modifier.testTag("save_wake_phrase_btn")
+                        ) {
+                            Text("Apply")
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Button(
+                            onClick = {
+                                viewModel.expansion.triggerManualWakeWord()
+                                handleOrbClick()
+                            },
+                            modifier = Modifier.testTag("manual_wake_fallback_btn")
+                        ) {
+                            Icon(Icons.Filled.Mic, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Manual Wake Trigger")
+                        }
+                        FilterChip(
+                            selected = prefs.offlineEmergencyMode,
+                            onClick = { viewModel.expansion.setOfflineEmergencyMode(!prefs.offlineEmergencyMode) },
+                            label = { Text(if (prefs.offlineEmergencyMode) "Offline Emergency: ON" else "Offline Emergency: OFF") },
+                            modifier = Modifier.testTag("core_offline_emergency_chip")
+                        )
+                        AssistChip(
+                            onClick = { viewModel.expansion.readClipboard() },
+                            label = { Text("Read Clipboard") },
+                            modifier = Modifier.testTag("core_read_clipboard_chip")
                         )
                     }
                 }

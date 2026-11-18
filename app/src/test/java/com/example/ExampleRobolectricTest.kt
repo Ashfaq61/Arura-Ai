@@ -824,4 +824,237 @@ class ExampleRobolectricTest {
         assertEquals(1.0f, com.example.aura.voice.VoiceEngine.DEVICE_FALLBACK_PITCH, 0.001f)
         engine.release()
     }
+
+    @Test
+    fun `manifest declares REQUEST_INSTALL_PACKAGES and GitHubKeyStore encrypts token and persists rollback state`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val pkgInfo = context.packageManager.getPackageInfo(
+            context.packageName,
+            android.content.pm.PackageManager.GET_PERMISSIONS
+        )
+        assertTrue(pkgInfo.requestedPermissions?.contains(android.Manifest.permission.INTERNET) == true)
+        assertTrue(pkgInfo.requestedPermissions?.contains(android.Manifest.permission.REQUEST_INSTALL_PACKAGES) == true)
+
+        val store = com.example.aura.security.GitHubKeyStore(context)
+        store.clearAll()
+
+        val defaultCfg = store.loadConfig()
+        assertEquals(com.example.aura.github.DEFAULT_AURA_BRANCH, defaultCfg.branch)
+        assertFalse(defaultCfg.allowWorkflowEdits)
+
+        store.saveConfig(
+            owner = "aura-dev",
+            repo = "aura-android",
+            branch = "aura-changes",
+            token = "github_pat_secret_1234567890",
+            allowWorkflowEdits = false
+        )
+        store.saveLastWorkingVersion("v1.0.4")
+        store.savePreviousRelease(
+            com.example.aura.github.GitHubReleaseInfo(
+                tagName = "v1.0.3",
+                name = "Aura AI v1.0.3",
+                body = "Prev",
+                htmlUrl = "https://github.com/aura-dev/aura-android/releases/tag/v1.0.3",
+                apkAsset = com.example.aura.github.GitHubReleaseAsset(
+                    id = 99L,
+                    name = "aura-ai-v1.0.3.apk",
+                    apiAssetUrl = "https://api.github.com/repos/aura-dev/aura-android/releases/assets/99",
+                    browserDownloadUrl = "",
+                    sizeBytes = 1024L
+                )
+            )
+        )
+
+        val loaded = store.loadConfig()
+        assertEquals("aura-dev", loaded.owner)
+        assertEquals("aura-android", loaded.repo)
+        assertEquals("aura-changes", loaded.branch)
+        assertEquals("github_pat_secret_1234567890", loaded.token)
+        assertEquals("v1.0.4", store.getLastWorkingVersion())
+        assertEquals("v1.0.3", store.getPreviousRelease()?.tagName)
+        store.clearAll()
+    }
+
+    @Test
+    fun `github push guard enforces main branch workflow toggle signing and secret blocks`() {
+        val cleanDraft = listOf(
+            com.example.aura.github.GitHubFileDraft(
+                path = "app/src/main/java/com/example/Helper.kt",
+                newContent = "package com.example\nfun greet() = \"Hello\"\n",
+                existingContent = "package com.example\nfun greet() = \"Hi\"\n",
+                existingSha = "abc123"
+            )
+        )
+
+        // 1. Direct push to main is always blocked
+        val mainBlock = com.example.aura.github.GitHubPushGuard.validateProposal(
+            files = cleanDraft,
+            targetBranch = "main",
+            allowWorkflowEdits = true
+        )
+        assertTrue(mainBlock is com.example.aura.github.PushGuardResult.Blocked)
+
+        // 2. Clean push to aura-changes is allowed
+        val auraOk = com.example.aura.github.GitHubPushGuard.validateProposal(
+            files = cleanDraft,
+            targetBranch = "aura-changes",
+            allowWorkflowEdits = false
+        )
+        assertTrue(auraOk is com.example.aura.github.PushGuardResult.Allowed)
+
+        // 3. Workflow edit blocked when toggle is OFF, allowed when ON
+        val workflowDraft = listOf(
+            com.example.aura.github.GitHubFileDraft(
+                path = ".github/workflows/android-ci.yml",
+                newContent = "name: CI\n"
+            )
+        )
+        assertTrue(
+            com.example.aura.github.GitHubPushGuard.validateProposal(workflowDraft, "aura-changes", allowWorkflowEdits = false)
+                is com.example.aura.github.PushGuardResult.Blocked
+        )
+        assertTrue(
+            com.example.aura.github.GitHubPushGuard.validateProposal(workflowDraft, "aura-changes", allowWorkflowEdits = true)
+                is com.example.aura.github.PushGuardResult.Allowed
+        )
+
+        // 4. Signing files and token-containing content are always blocked
+        val signingDraft = listOf(
+            com.example.aura.github.GitHubFileDraft(path = "debug.keystore", newContent = "binary")
+        )
+        assertTrue(
+            com.example.aura.github.GitHubPushGuard.validateProposal(signingDraft, "aura-changes", allowWorkflowEdits = true)
+                is com.example.aura.github.PushGuardResult.Blocked
+        )
+
+        val leakDraft = listOf(
+            com.example.aura.github.GitHubFileDraft(
+                path = "app/Config.kt",
+                newContent = "const val TOKEN = \"github_pat_ABCDEFGH1234567890\""
+            )
+        )
+        assertTrue(
+            com.example.aura.github.GitHubPushGuard.validateProposal(leakDraft, "aura-changes", allowWorkflowEdits = true)
+                is com.example.aura.github.PushGuardResult.Blocked
+        )
+
+        // Diff & version comparison checks
+        val diff = cleanDraft.first().diffLines
+        assertTrue(diff.any { it.type == com.example.aura.github.DiffLineType.REMOVED && it.text.contains("Hi") })
+        assertTrue(diff.any { it.type == com.example.aura.github.DiffLineType.ADDED && it.text.contains("Hello") })
+        assertTrue(com.example.aura.github.ApkVersionComparator.isNewerVersion("v1.0.12", "1.0.5"))
+        assertFalse(com.example.aura.github.ApkVersionComparator.isNewerVersion("v1.0.5", "1.0.5"))
+    }
+
+    @Test
+    fun `github self update client handles connection test push merge 30 line log tail and redirect safe download`() = runTest {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val seenAuthOnRedirect = mutableListOf<String?>()
+        val fakeApkBytes = "PK_FAKE_APK_PAYLOAD".toByteArray()
+        val fortyLinesLog = (1..40).joinToString("\n") { "Log line $it" }
+
+        val mockHttp = okhttp3.OkHttpClient.Builder()
+            .addInterceptor { chain ->
+                val req = chain.request()
+                val url = req.url.toString()
+                val auth = req.header("Authorization")
+
+                when {
+                    url == "https://api.github.com/repos/aura/app" -> {
+                        val (code, body) = when (auth) {
+                            "Bearer bad_401" -> 401 to """{"message":"Bad credentials"}"""
+                            "Bearer forbidden_403" -> 403 to """{"message":"Resource not accessible"}"""
+                            "Bearer offline" -> throw java.net.UnknownHostException("api.github.com")
+                            else -> 200 to """{"full_name":"aura/app","default_branch":"main","private":false}"""
+                        }
+                        okhttp3.Response.Builder().request(req).protocol(okhttp3.Protocol.HTTP_1_1)
+                            .code(code).message("OK").body(body.toResponseBody("application/json".toMediaType())).build()
+                    }
+                    url.contains("/git/ref/heads/aura-changes") ->
+                        okhttp3.Response.Builder().request(req).protocol(okhttp3.Protocol.HTTP_1_1)
+                            .code(200).message("OK").body("""{"object":{"sha":"base123"}}""".toResponseBody("application/json".toMediaType())).build()
+                    url.contains("/contents/app/Helper.kt") && req.method == "PUT" ->
+                        okhttp3.Response.Builder().request(req).protocol(okhttp3.Protocol.HTTP_1_1)
+                            .code(200).message("OK").body("""{"commit":{"sha":"deadbeef1234","html_url":"https://github.com/aura/app/commit/deadbeef1234"}}""".toResponseBody("application/json".toMediaType())).build()
+                    url.endsWith("/merges") && req.method == "POST" ->
+                        okhttp3.Response.Builder().request(req).protocol(okhttp3.Protocol.HTTP_1_1)
+                            .code(201).message("Created").body("""{"sha":"merge999","html_url":"https://github.com/aura/app/commit/merge999"}""".toResponseBody("application/json".toMediaType())).build()
+                    url.contains("/actions/runs?branch=aura-changes") ->
+                        okhttp3.Response.Builder().request(req).protocol(okhttp3.Protocol.HTTP_1_1)
+                            .code(200).message("OK").body("""{"workflow_runs":[{"id":555,"name":"AURA CI","head_branch":"aura-changes","status":"completed","conclusion":"failure","html_url":"https://github.com/aura/app/actions/runs/555","head_sha":"deadbeef","updated_at":"2026-11-18"}]}""".toResponseBody("application/json".toMediaType())).build()
+                    url.endsWith("/actions/runs/555/jobs") ->
+                        okhttp3.Response.Builder().request(req).protocol(okhttp3.Protocol.HTTP_1_1)
+                            .code(200).message("OK").body("""{"jobs":[{"id":777,"conclusion":"failure"}]}""".toResponseBody("application/json".toMediaType())).build()
+                    url.endsWith("/actions/jobs/777/logs") ->
+                        okhttp3.Response.Builder().request(req).protocol(okhttp3.Protocol.HTTP_1_1)
+                            .code(200).message("OK").body(fortyLinesLog.toResponseBody("text/plain".toMediaType())).build()
+                    url.endsWith("/releases/latest") ->
+                        okhttp3.Response.Builder().request(req).protocol(okhttp3.Protocol.HTTP_1_1)
+                            .code(200).message("OK").body("""{"tag_name":"v1.0.9","name":"Aura v1.0.9","body":"Fix","html_url":"https://github.com/aura/app/releases/tag/v1.0.9","assets":[{"id":1,"name":"aura.apk","url":"https://api.github.com/repos/aura/app/releases/assets/1","browser_download_url":"https://github.com/dl","size":19}]}""".toResponseBody("application/json".toMediaType())).build()
+                    url.endsWith("/releases?per_page=10") ->
+                        okhttp3.Response.Builder().request(req).protocol(okhttp3.Protocol.HTTP_1_1)
+                            .code(200).message("OK").body("""[{"tag_name":"v1.0.9","name":"Aura v1.0.9","assets":[{"id":1,"name":"aura.apk","url":"https://api.github.com/repos/aura/app/releases/assets/1","browser_download_url":"","size":19}]},{"tag_name":"v1.0.8","name":"Aura v1.0.8","assets":[{"id":2,"name":"aura8.apk","url":"https://api.github.com/repos/aura/app/releases/assets/2","browser_download_url":"","size":19}]}]""".toResponseBody("application/json".toMediaType())).build()
+                    url == "https://api.github.com/repos/aura/app/releases/assets/1" ->
+                        okhttp3.Response.Builder().request(req).protocol(okhttp3.Protocol.HTTP_1_1)
+                            .code(302).message("Found").header("Location", "https://objects.githubusercontent.com/apk-blob/aura.apk")
+                            .body("".toResponseBody("text/plain".toMediaType())).build()
+                    url == "https://objects.githubusercontent.com/apk-blob/aura.apk" -> {
+                        seenAuthOnRedirect.add(auth)
+                        okhttp3.Response.Builder().request(req).protocol(okhttp3.Protocol.HTTP_1_1)
+                            .code(200).message("OK").body(fakeApkBytes.toResponseBody("application/vnd.android.package-archive".toMediaType())).build()
+                    }
+                    else ->
+                        okhttp3.Response.Builder().request(req).protocol(okhttp3.Protocol.HTTP_1_1)
+                            .code(404).message("Not Found").body("""{"message":"Not Found"}""".toResponseBody("application/json".toMediaType())).build()
+                }
+            }
+            .build()
+
+        val client = com.example.aura.github.GitHubSelfUpdateClient(httpClient = mockHttp)
+        val okCfg = com.example.aura.github.GitHubConfig("aura", "app", "aura-changes", "good_token")
+
+        assertTrue(client.testConnection(okCfg).isOk)
+        assertTrue(client.testConnection(okCfg.copy(token = "bad_401")).message.contains("401"))
+        assertTrue(client.testConnection(okCfg.copy(token = "forbidden_403")).message.contains("403"))
+        assertTrue(client.testConnection(okCfg.copy(token = "offline")).message.contains("No internet", ignoreCase = true))
+
+        val proposal = com.example.aura.github.PendingGitHubPushProposal(
+            branch = "aura-changes",
+            commitMessage = "Update Helper",
+            explanation = "Test",
+            files = listOf(com.example.aura.github.GitHubFileDraft("app/Helper.kt", "package com.example\n"))
+        )
+        val pushRes = client.pushApprovedProposal(okCfg, proposal)
+        assertTrue(pushRes.isSuccess)
+        assertEquals("deadbeef1234", pushRes.getOrThrow().commitSha)
+
+        val mergeRes = client.mergeBranchToMain(okCfg)
+        assertTrue(mergeRes.isSuccess)
+        assertTrue(mergeRes.getOrThrow().contains("merge99"))
+
+        val runStatus = client.fetchLatestWorkflowRun(okCfg, "aura-changes").getOrThrow()
+        assertEquals(com.example.aura.github.CiBuildStage.FAILED, runStatus?.stage)
+
+        val logTail = client.fetchFailedJobLogTail(okCfg, 555L, 30).getOrThrow()
+        assertEquals(30, logTail.lines().size)
+        assertEquals("Log line 11", logTail.lines().first())
+        assertEquals("Log line 40", logTail.lines().last())
+
+        val releasePair = client.fetchLatestAndPreviousRelease(okCfg).getOrThrow()
+        assertEquals("v1.0.9", releasePair.latest?.tagName)
+        assertEquals("v1.0.8", releasePair.previous?.tagName)
+
+        val dlFile = java.io.File(context.cacheDir, "test_aura_dl.apk")
+        dlFile.delete()
+        val dlRes = client.downloadReleaseApk(
+            config = okCfg,
+            assetUrl = releasePair.latest!!.apkAsset!!.apiAssetUrl,
+            destinationFile = dlFile,
+            onProgress = {}
+        )
+        assertTrue(dlRes.isSuccess)
+        assertEquals(listOf<String?>(null), seenAuthOnRedirect)
+        dlFile.delete()
+    }
 }

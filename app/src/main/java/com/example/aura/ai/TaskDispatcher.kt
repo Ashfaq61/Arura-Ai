@@ -138,8 +138,11 @@ class TaskDispatcher(
     fun evaluateIntent(request: IncomingTaskRequest): TaskDispatchPlan {
         val raw = request.rawInstruction.trim()
         val lower = raw.lowercase()
+        val effectiveOnline = request.isNetworkAvailable &&
+            !request.prefs.offlineEmergencyMode &&
+            request.prefs.autonomyPolicy.externalApiMasterEnabled
         val budgetPolicy = BudgetPolicy(
-            intelligenceMode = request.prefs.intelligenceMode,
+            intelligenceMode = if (request.prefs.offlineEmergencyMode) "LOCAL_ONLY" else request.prefs.intelligenceMode,
             freeOnlyMode = request.prefs.freeOnlyMode,
             dailyBudgetUsd = request.prefs.dailyBudgetUsd,
             dailyTokenLimit = request.prefs.dailyTokenLimit
@@ -152,7 +155,7 @@ class TaskDispatcher(
                 requiresVision = requiresVision,
                 isComplexReasoning = isComplex,
                 isSimpleLocalTask = isSimpleLocal,
-                isNetworkAvailable = request.isNetworkAvailable,
+                isNetworkAvailable = effectiveOnline,
                 todayTokensUsed = request.todayTokensUsed,
                 todaySpendUsd = request.todaySpendUsd,
                 policy = budgetPolicy
@@ -528,7 +531,9 @@ class TaskDispatcher(
         val quickPlan = evaluateIntent(request)
         if (quickPlan.confidence >= 0.85f ||
             !request.isNetworkAvailable ||
-            request.prefs.intelligenceMode == "LOCAL_ONLY"
+            request.prefs.intelligenceMode == "LOCAL_ONLY" ||
+            request.prefs.offlineEmergencyMode ||
+            !request.prefs.autonomyPolicy.externalApiMasterEnabled
         ) {
             _lastDispatchPlan.value = quickPlan
             return quickPlan

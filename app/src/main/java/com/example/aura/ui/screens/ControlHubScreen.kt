@@ -5,15 +5,18 @@ import android.accessibilityservice.AccessibilityService
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.Matrix
+import android.os.BatteryManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
+import java.util.concurrent.Executors
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
@@ -47,6 +50,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -84,7 +88,17 @@ import com.example.aura.ui.components.StatusPill
 @Composable
 fun ControlHubScreen(viewModel: AuraViewModel) {
     var subTab by remember { mutableIntStateOf(0) }
-    val tabs = listOf("Accessibility", "CameraX Vision", "Apps & Device", "Calls & Docs")
+    val tabs = listOf(
+        "Accessibility",
+        "CameraX Vision",
+        "Apps & Device",
+        "Calls & Docs",
+        "Knowledge Graph",
+        "Productivity",
+        "Smart Inbox",
+        "Offline SOS",
+        "Share & Clip"
+    )
 
     Column(modifier = Modifier.fillMaxSize()) {
         PrimaryScrollableTabRow(selectedTabIndex = subTab, edgePadding = 12.dp) {
@@ -101,6 +115,11 @@ fun ControlHubScreen(viewModel: AuraViewModel) {
             1 -> CameraVisionTab(viewModel)
             2 -> AppsAndDeviceTab(viewModel)
             3 -> CallsMessagingDocsTab(viewModel)
+            4 -> KnowledgeGraphTab(viewModel)
+            5 -> ProductivityAndCalendarTab(viewModel)
+            6 -> IntelligentNotificationsTab(viewModel)
+            7 -> OfflineEmergencyTab(viewModel)
+            8 -> ShareAndClipboardTab(viewModel)
         }
     }
 }
@@ -292,6 +311,7 @@ private fun AccessibilityAutomationTab(viewModel: AuraViewModel) {
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun CameraVisionTab(viewModel: AuraViewModel) {
     val context = LocalContext.current
@@ -305,9 +325,19 @@ private fun CameraVisionTab(viewModel: AuraViewModel) {
         )
     }
     var useFrontCamera by remember { mutableStateOf(false) }
-    var prompt by remember { mutableStateOf("Describe what you see, extract any visible text (OCR), and identify objects.") }
+    var liveStreamEnabled by remember { mutableStateOf(false) }
+    var visionMode by remember { mutableStateOf("SCENE") }
+    val modePrompts = mapOf(
+        "SCENE" to "Describe the live camera scene, spatial layout, and actionable elements concisely.",
+        "OCR" to "Extract all visible printed or handwritten text (OCR) accurately with line breaks.",
+        "OBJECTS" to "Identify and list the main objects, labels, and brands visible in frame.",
+        "DOCUMENT" to "Scan this document/receipt: extract title, dates, totals, and key structured fields.",
+        "QA" to "Answer the user's visual question precisely based only on what is visible in the frame."
+    )
+    var prompt by remember { mutableStateOf(modePrompts["SCENE"].orEmpty()) }
     var lastCapturedBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var imageCapture by remember { mutableStateOf<ImageCapture?>(null) }
+    var liveStreamNote by remember { mutableStateOf("Live ImageAnalysis paused (enable toggle for throttled 3.5s stream).") }
 
     val cameraPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -328,7 +358,7 @@ private fun CameraVisionTab(viewModel: AuraViewModel) {
                     Column(modifier = Modifier.padding(16.dp)) {
                         Text("CameraX Multimodal Vision", style = MaterialTheme.typography.titleMedium)
                         Spacer(modifier = Modifier.height(6.dp))
-                        Text("Grant CAMERA permission to preview front/rear cameras, take photos, and run Gemini Vision Q&A / OCR.", style = MaterialTheme.typography.bodySmall)
+                        Text("Grant CAMERA permission to preview front/rear cameras, run live ImageAnalysis vision streaming, and execute OCR / Document / Object Q&A.", style = MaterialTheme.typography.bodySmall)
                         Spacer(modifier = Modifier.height(10.dp))
                         Button(
                             onClick = { cameraPermissionLauncher.launch(Manifest.permission.CAMERA) },
@@ -350,20 +380,70 @@ private fun CameraVisionTab(viewModel: AuraViewModel) {
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(260.dp)
+                                .height(250.dp)
                                 .clip(RoundedCornerShape(14.dp))
                         ) {
                             CameraXPreviewBox(
                                 useFrontCamera = useFrontCamera,
                                 lifecycleOwner = lifecycleOwner,
-                                onImageCaptureReady = { imageCapture = it }
+                                liveStreamEnabled = liveStreamEnabled,
+                                isBusy = isBusy,
+                                onImageCaptureReady = { imageCapture = it },
+                                onLiveFrameSampled = { frameBmp ->
+                                    val bm = context.getSystemService(BatteryManager::class.java)
+                                    val batPct = bm?.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY) ?: 100
+                                    if (batPct < 20 && bm?.isCharging == false) {
+                                        liveStreamEnabled = false
+                                        liveStreamNote = "Paused Live Vision: battery < 20% protection."
+                                    } else {
+                                        lastCapturedBitmap = frameBmp
+                                        liveStreamNote = "Live $visionMode frame analyzed (${frameBmp.width}x${frameBmp.height})."
+                                        viewModel.analyzeCameraBitmap(frameBmp, "[$visionMode LIVE] $prompt")
+                                    }
+                                }
                             )
                         }
                         Spacer(modifier = Modifier.height(10.dp))
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            listOf("SCENE" to "Scene", "OCR" to "OCR Text", "OBJECTS" to "Objects", "DOCUMENT" to "Document", "QA" to "Visual Q&A").forEach { (id, label) ->
+                                FilterChip(
+                                    selected = visionMode == id,
+                                    onClick = {
+                                        visionMode = id
+                                        prompt = modePrompts[id].orEmpty()
+                                    },
+                                    label = { Text(label) },
+                                    modifier = Modifier.testTag("vision_mode_${id.lowercase()}")
+                                )
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Row(
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text("Live Camera Analysis (3.5s throttled)", style = MaterialTheme.typography.bodyMedium)
+                                Text(liveStreamNote, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                            Switch(
+                                checked = liveStreamEnabled,
+                                onCheckedChange = {
+                                    liveStreamEnabled = it
+                                    liveStreamNote = if (it) "Live $visionMode ImageAnalysis active..." else "Live ImageAnalysis paused."
+                                },
+                                modifier = Modifier.testTag("live_camera_analysis_switch")
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(8.dp))
                         OutlinedTextField(
                             value = prompt,
                             onValueChange = { prompt = it },
-                            label = { Text("Vision Question / OCR Prompt") },
+                            label = { Text("Vision Question / $visionMode Prompt") },
                             modifier = Modifier.fillMaxWidth()
                         )
                         Spacer(modifier = Modifier.height(10.dp))
@@ -380,15 +460,18 @@ private fun CameraVisionTab(viewModel: AuraViewModel) {
                                         ContextCompat.getMainExecutor(context),
                                         object : ImageCapture.OnImageCapturedCallback() {
                                             override fun onCaptureSuccess(image: ImageProxy) {
-                                                val rawBmp = image.toBitmap()
-                                                val rotation = image.imageInfo.rotationDegrees.toFloat()
-                                                val rotated = if (rotation != 0f) {
-                                                    val m = Matrix().apply { postRotate(rotation) }
-                                                    Bitmap.createBitmap(rawBmp, 0, 0, rawBmp.width, rawBmp.height, m, true)
-                                                } else rawBmp
-                                                image.close()
+                                                val rotated = try {
+                                                    val rawBmp = image.toBitmap()
+                                                    val rotation = image.imageInfo.rotationDegrees.toFloat()
+                                                    if (rotation != 0f) {
+                                                        val m = Matrix().apply { postRotate(rotation) }
+                                                        Bitmap.createBitmap(rawBmp, 0, 0, rawBmp.width, rawBmp.height, m, true)
+                                                    } else rawBmp
+                                                } finally {
+                                                    image.close()
+                                                }
                                                 lastCapturedBitmap = rotated
-                                                viewModel.analyzeCameraBitmap(rotated, prompt)
+                                                viewModel.analyzeCameraBitmap(rotated, "[$visionMode] $prompt")
                                             }
 
                                             override fun onError(exception: ImageCaptureException) {
@@ -398,7 +481,9 @@ private fun CameraVisionTab(viewModel: AuraViewModel) {
                                     )
                                 },
                                 enabled = !isBusy,
-                                modifier = Modifier.weight(1f)
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("camera_capture_analyze_btn")
                             ) {
                                 Icon(Icons.Filled.CameraAlt, contentDescription = null)
                                 Spacer(modifier = Modifier.width(6.dp))
@@ -443,14 +528,30 @@ private fun CameraVisionTab(viewModel: AuraViewModel) {
 private fun CameraXPreviewBox(
     useFrontCamera: Boolean,
     lifecycleOwner: androidx.lifecycle.LifecycleOwner,
-    onImageCaptureReady: (ImageCapture) -> Unit
+    liveStreamEnabled: Boolean,
+    isBusy: Boolean,
+    onImageCaptureReady: (ImageCapture) -> Unit,
+    onLiveFrameSampled: (Bitmap) -> Unit
 ) {
     val context = LocalContext.current
     val previewView = remember { PreviewView(context) }
+    val analysisExecutor = remember { Executors.newSingleThreadExecutor() }
+    val latestLiveEnabled = remember(liveStreamEnabled) { liveStreamEnabled }
+    val latestBusy = remember(isBusy) { isBusy }
+    var liveFlag by remember { mutableStateOf(liveStreamEnabled) }
+    var busyFlag by remember { mutableStateOf(isBusy) }
+    liveFlag = latestLiveEnabled
+    busyFlag = latestBusy
+
+    DisposableEffect(Unit) {
+        onDispose { analysisExecutor.shutdown() }
+    }
 
     DisposableEffect(useFrontCamera) {
         val future = ProcessCameraProvider.getInstance(context)
-        val executor = ContextCompat.getMainExecutor(context)
+        val mainExecutor = ContextCompat.getMainExecutor(context)
+        var lastSampleTimeMs = 0L
+
         future.addListener({
             runCatching {
                 val provider = future.get()
@@ -458,12 +559,36 @@ private fun CameraXPreviewBox(
                     it.surfaceProvider = previewView.surfaceProvider
                 }
                 val capture = ImageCapture.Builder().build()
+                val analysis = ImageAnalysis.Builder()
+                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                    .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
+                    .build()
+                    .also { analyzerUseCase ->
+                        analyzerUseCase.setAnalyzer(analysisExecutor) { image ->
+                            try {
+                                val now = System.currentTimeMillis()
+                                if (liveFlag && !busyFlag && now - lastSampleTimeMs >= 3500L) {
+                                    lastSampleTimeMs = now
+                                    val rawBmp = image.toBitmap()
+                                    val rotation = image.imageInfo.rotationDegrees.toFloat()
+                                    val upright = if (rotation != 0f) {
+                                        val m = Matrix().apply { postRotate(rotation) }
+                                        Bitmap.createBitmap(rawBmp, 0, 0, rawBmp.width, rawBmp.height, m, true)
+                                    } else rawBmp
+                                    mainExecutor.execute { onLiveFrameSampled(upright) }
+                                }
+                            } finally {
+                                image.close()
+                            }
+                        }
+                    }
+
                 val selector = if (useFrontCamera) CameraSelector.DEFAULT_FRONT_CAMERA else CameraSelector.DEFAULT_BACK_CAMERA
                 provider.unbindAll()
-                provider.bindToLifecycle(lifecycleOwner, selector, preview, capture)
+                provider.bindToLifecycle(lifecycleOwner, selector, preview, capture, analysis)
                 onImageCaptureReady(capture)
             }
-        }, executor)
+        }, mainExecutor)
 
         onDispose {
             runCatching { future.get().unbindAll() }

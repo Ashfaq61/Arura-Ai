@@ -5,4 +5,9 @@
     <string name="notification_listener_label">AURA AI Notification Reader</string>
     <string name="aura_tagline">Autonomous Multi-Agent Android Intelligence</string>
     <string name="emergency_stop">STOP</string>
+    <string name="share_target_label">Send to AURA AI</string>
+    <string name="wake_word_default_phrase">Hey AURA</string>
+    <string name="offline_emergency_mode">Offline Emergency Mode</string>
+    <string name="autonomy_controls_title">User-Controlled Autonomy</string>
+    <string name="sync_channel_github">GitHub Encrypted Sync</string>
 </resources>

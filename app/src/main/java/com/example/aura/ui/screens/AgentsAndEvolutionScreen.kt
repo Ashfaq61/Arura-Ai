@@ -65,7 +65,11 @@ fun AgentsAndEvolutionScreen(viewModel: AuraViewModel) {
         "Schedules",
         "Self-Evolution",
         "Research Hub",
-        "Tool Factory"
+        "Tool Factory",
+        "Smart Routines",
+        "Workflow Builder",
+        "Recipes",
+        "App Compat"
     )
 
     Column(modifier = Modifier.fillMaxSize()) {
@@ -87,6 +91,10 @@ fun AgentsAndEvolutionScreen(viewModel: AuraViewModel) {
             4 -> SelfEvolutionTab(viewModel)
             5 -> ResearchHubTab(viewModel)
             6 -> ToolFactoryTab(viewModel)
+            7 -> SmartRoutinesTab(viewModel)
+            8 -> VisualWorkflowBuilderTab(viewModel)
+            9 -> AutomationRecipesTab(viewModel)
+            10 -> AppCompatibilityTab(viewModel)
         }
     }
 }

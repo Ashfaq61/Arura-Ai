@@ -34,6 +34,22 @@ import com.example.aura.evolution.SelfHealingEngine
 import com.example.aura.evolution.ToolFactoryAndEvolutionEngine
 import com.example.aura.files.FileDocumentManager
 import com.example.aura.files.LoadedDocumentResult
+import com.example.aura.github.ApkInstallResult
+import com.example.aura.github.ApkSelfUpdater
+import com.example.aura.github.ApkVersionComparator
+import com.example.aura.github.CiBuildStage
+import com.example.aura.github.DEFAULT_AURA_BRANCH
+import com.example.aura.github.GitHubConfig
+import com.example.aura.github.GitHubFileDraft
+import com.example.aura.github.GitHubPushGuard
+import com.example.aura.github.GitHubReleaseInfo
+import com.example.aura.github.GitHubSelfUpdateClient
+import com.example.aura.github.GitHubWorkflowRunStatus
+import com.example.aura.github.MAX_AUTO_FIX_ATTEMPTS
+import com.example.aura.github.PackageInstallFeedback
+import com.example.aura.github.PendingGitHubPushProposal
+import com.example.aura.github.PushGuardResult
+import com.example.aura.github.SelfUpdateUiState
 import com.example.aura.memory.ApprovalRequestEntity
 import com.example.aura.memory.AuraDatabase
 import com.example.aura.memory.AuraPreferences
@@ -50,6 +66,7 @@ import com.example.aura.security.ApiKeySlot
 import com.example.aura.security.AuraKeystoreVault
 import com.example.aura.security.GeminiKeyEntry
 import com.example.aura.security.GeminiKeyStore
+import com.example.aura.security.GitHubKeyStore
 import com.example.aura.security.PermissionGuard
 import com.example.aura.security.PrivacyDataRouter
 import com.example.aura.security.PromptInjectionDefender
@@ -58,6 +75,7 @@ import com.example.aura.voice.VoiceEngine
 import com.example.aura.voice.VoiceOrbState
 import com.example.ui.theme.AuraThemeMode
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -65,9 +83,11 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
 
 class AuraViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -77,6 +97,9 @@ class AuraViewModel(application: Application) : AndroidViewModel(application) {
     val vault = AuraKeystoreVault(application)
     val geminiKeyStore = GeminiKeyStore(application)
     val geminiRestClient = GeminiRestClient()
+    val gitHubKeyStore = GitHubKeyStore(application)
+    val gitHubClient = GitHubSelfUpdateClient()
+    val apkSelfUpdater = ApkSelfUpdater(application)
     val permissionGuard = PermissionGuard()
     val agentNetwork = AgentNetworkManager()
     val deviceControl = DeviceControlEngine(application)
@@ -259,9 +282,85 @@ class AuraViewModel(application: Application) : AndroidViewModel(application) {
     private val _visionAnalysis = MutableStateFlow("")
     val visionAnalysis: StateFlow<String> = _visionAnalysis.asStateFlow()
 
+    // GitHub Auto-Build & Self-Update State
+    private val _gitHubConfig = MutableStateFlow(gitHubKeyStore.loadConfig())
+    val gitHubConfig: StateFlow<GitHubConfig> = _gitHubConfig.asStateFlow()
+
+    private val _gitHubConnectionStatus = MutableStateFlow<Pair<Boolean, String>?>(null)
+    val gitHubConnectionStatus: StateFlow<Pair<Boolean, String>?> = _gitHubConnectionStatus.asStateFlow()
+
+    private val _isTestingGitHub = MutableStateFlow(false)
+    val isTestingGitHub: StateFlow<Boolean> = _isTestingGitHub.asStateFlow()
+
+    private val _pendingGitHubPush = MutableStateFlow<PendingGitHubPushProposal?>(null)
+    val pendingGitHubPush: StateFlow<PendingGitHubPushProposal?> = _pendingGitHubPush.asStateFlow()
+
+    private val _isPreparingPushProposal = MutableStateFlow(false)
+    val isPreparingPushProposal: StateFlow<Boolean> = _isPreparingPushProposal.asStateFlow()
+
+    private val _isPushingGitHub = MutableStateFlow(false)
+    val isPushingGitHub: StateFlow<Boolean> = _isPushingGitHub.asStateFlow()
+
+    private val _lastGitHubCommitUrl = MutableStateFlow<String?>(null)
+    val lastGitHubCommitUrl: StateFlow<String?> = _lastGitHubCommitUrl.asStateFlow()
+
+    private val _lastGitHubCommitSha = MutableStateFlow<String?>(null)
+    val lastGitHubCommitSha: StateFlow<String?> = _lastGitHubCommitSha.asStateFlow()
+
+    private val _canMergeToMain = MutableStateFlow(false)
+    val canMergeToMain: StateFlow<Boolean> = _canMergeToMain.asStateFlow()
+
+    private val _isMergingToMain = MutableStateFlow(false)
+    val isMergingToMain: StateFlow<Boolean> = _isMergingToMain.asStateFlow()
+
+    private val _ciRunStatus = MutableStateFlow<GitHubWorkflowRunStatus?>(null)
+    val ciRunStatus: StateFlow<GitHubWorkflowRunStatus?> = _ciRunStatus.asStateFlow()
+
+    private val _isPollingCi = MutableStateFlow(false)
+    val isPollingCi: StateFlow<Boolean> = _isPollingCi.asStateFlow()
+
+    private val _failedJobLogTail = MutableStateFlow("")
+    val failedJobLogTail: StateFlow<String> = _failedJobLogTail.asStateFlow()
+
+    private val _autoFixAttemptCount = MutableStateFlow(0)
+    val autoFixAttemptCount: StateFlow<Int> = _autoFixAttemptCount.asStateFlow()
+
+    private val _isAutoFixingBuild = MutableStateFlow(false)
+    val isAutoFixingBuild: StateFlow<Boolean> = _isAutoFixingBuild.asStateFlow()
+
+    private val _selfUpdateState = MutableStateFlow(buildInitialSelfUpdateState())
+    val selfUpdateState: StateFlow<SelfUpdateUiState> = _selfUpdateState.asStateFlow()
+
     private var activeJob: Job? = null
+    private var ciPollingJob: Job? = null
+
+    val expansion: AuraExpansionController = AuraExpansionController(
+        app = application,
+        scope = viewModelScope,
+        db = db,
+        memoryRepository = memoryRepository,
+        preferencesRepository = preferencesRepository,
+        permissionGuard = permissionGuard,
+        deviceControl = deviceControl,
+        callMessaging = callMessaging,
+        fileManager = fileManager,
+        voiceEngine = voiceEngine,
+        selfHealing = selfHealing,
+        gitHubClient = gitHubClient,
+        agents = agents,
+        skills = skills,
+        tasks = tasks,
+        providerUsage = providerUsage,
+        preferences = preferences,
+        gitHubConfig = gitHubConfig,
+        deviceHealth = deviceHealth,
+        isGeminiConfigured = { geminiKeyStore.getKeys().isNotEmpty() },
+        onBanner = { msg -> _statusBanner.value = msg },
+        onDispatchPrompt = { cmd -> sendCommand(cmd, speakReply = false) }
+    )
 
     init {
+        expansion.initialize()
         viewModelScope.launch {
             memoryRepository.seedInitialCatalogIfEmpty()
             SelfEvolutionWorker.schedulePeriodic(getApplication())
@@ -312,6 +411,32 @@ class AuraViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
         }
+        viewModelScope.launch {
+            ApkSelfUpdater.installFeedback.collect { feedback ->
+                when (feedback) {
+                    is PackageInstallFeedback.Idle -> Unit
+                    is PackageInstallFeedback.Succeeded -> {
+                        val (verName, _) = ApkVersionComparator.getInstalledVersionInfo(getApplication())
+                        gitHubKeyStore.saveLastWorkingVersion("v$verName")
+                        _selfUpdateState.value = _selfUpdateState.value.copy(
+                            lastWorkingVersion = "v$verName",
+                            statusMessage = feedback.message,
+                            errorMessage = null
+                        )
+                        _statusBanner.value = feedback.message
+                    }
+                    is PackageInstallFeedback.Failed -> {
+                        _selfUpdateState.value = _selfUpdateState.value.copy(
+                            errorMessage = feedback.message
+                        )
+                        _statusBanner.value = feedback.message
+                    }
+                }
+            }
+        }
+        if (_gitHubConfig.value.isConfigured) {
+            checkForAppUpdate(silent = true)
+        }
     }
 
     fun clearBanner() {
@@ -329,6 +454,17 @@ class AuraViewModel(application: Application) : AndroidViewModel(application) {
         if (trimmed.isEmpty() && attachedBitmap == null) return
 
         val prefsSnapshot = preferences.value
+        if (prefsSnapshot.offlineEmergencyMode || !prefsSnapshot.autonomyPolicy.externalApiMasterEnabled) {
+            val offlineLower = trimmed.lowercase()
+            if (offlineLower.contains("flashlight") || offlineLower.contains("torch") ||
+                offlineLower.startsWith("convert ") || offlineLower.any { it.isDigit() } &&
+                (offlineLower.contains("+") || offlineLower.contains("-") || offlineLower.contains("*") || offlineLower.contains("/"))
+            ) {
+                val res = expansion.offlineEmergency.runOfflineCommand(trimmed)
+                orchestrator.injectLocalAssistantNote("Offline Utility: $res", userPrompt = trimmed)
+                return
+            }
+        }
         val quickPlan = orchestrator.taskDispatcher.evaluateIntent(
             IncomingTaskRequest(
                 rawInstruction = trimmed,
@@ -339,13 +475,26 @@ class AuraViewModel(application: Application) : AndroidViewModel(application) {
         )
         val routesToAi = quickPlan.target is DispatchTarget.AiProvider ||
             quickPlan.target is DispatchTarget.HybridVisionProvider
-        if (routesToAi && shouldPromptForMissingGeminiKey(prefsSnapshot.activeProviderId, prefsSnapshot.intelligenceMode)) {
+        if (routesToAi && !prefsSnapshot.offlineEmergencyMode && prefsSnapshot.autonomyPolicy.externalApiMasterEnabled &&
+            shouldPromptForMissingGeminiKey(prefsSnapshot.activeProviderId, prefsSnapshot.intelligenceMode)
+        ) {
             _showMissingGeminiKeyDialog.value = true
             return
         }
 
         activeJob?.cancel()
         activeJob = viewModelScope.launch {
+            val matchedRoutine = expansion.smartRoutines.findMatchingVoiceRoutine(trimmed)
+            if (matchedRoutine != null) {
+                val report = expansion.smartRoutines.executeRoutine(
+                    matchedRoutine,
+                    prefsSnapshot.autonomyPolicy,
+                    isManualTrigger = true
+                ) { spoken ->
+                    if (speakReply) voiceEngine.speak(spoken, _selectedVoiceName.value, AuraLanguage.ENGLISH)
+                }
+                _statusBanner.value = "Triggered Routine '${matchedRoutine.name}': ${report.summary}"
+            }
             _isBusy.value = true
             voiceEngine.setOrbState(VoiceOrbState.THINKING)
             try {
@@ -400,6 +549,7 @@ class AuraViewModel(application: Application) : AndroidViewModel(application) {
         _isBusy.value = false
         permissionGuard.triggerEmergencyStop()
         voiceEngine.emergencyStopAll()
+        expansion.wakeWordEngine.stopMonitoring()
         agentNetwork.resetAllToOnline()
         viewModelScope.launch {
             memoryRepository.logAudit("User", "EMERGENCY_STOP", 1, "ALLOWED", "Immediate stop activated across voice, AI, and automation.")
@@ -1014,6 +1164,652 @@ class AuraViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    // --- GitHub Auto-Build & Self-Update Actions ---
+
+    private fun buildInitialSelfUpdateState(): SelfUpdateUiState {
+        val (verName, verCode) = ApkVersionComparator.getInstalledVersionInfo(getApplication())
+        var lastWorking = gitHubKeyStore.getLastWorkingVersion()
+        if (lastWorking.isBlank()) {
+            lastWorking = "v$verName"
+            gitHubKeyStore.saveLastWorkingVersion(lastWorking)
+        }
+        return SelfUpdateUiState(
+            installedVersionName = verName,
+            installedVersionCode = verCode,
+            lastWorkingVersion = lastWorking,
+            previousRelease = gitHubKeyStore.getPreviousRelease(),
+            needsUnknownSourcesPermission = !apkSelfUpdater.canRequestPackageInstalls()
+        )
+    }
+
+    fun saveGitHubSettings(
+        owner: String,
+        repo: String,
+        branch: String,
+        token: String,
+        allowWorkflowEdits: Boolean
+    ) {
+        val resolvedBranch = branch.trim().ifBlank { DEFAULT_AURA_BRANCH }
+        if (resolvedBranch.equals("main", ignoreCase = true) || resolvedBranch.equals("master", ignoreCase = true)) {
+            _gitHubConnectionStatus.value = false to "Branch cannot be 'main' or 'master'. Using '$DEFAULT_AURA_BRANCH'."
+            _statusBanner.value = "Protected branch blocked. Aura pushes only to '$DEFAULT_AURA_BRANCH'."
+            val saved = gitHubKeyStore.saveConfig(owner, repo, DEFAULT_AURA_BRANCH, token, allowWorkflowEdits)
+            _gitHubConfig.value = saved
+            return
+        }
+        val saved = gitHubKeyStore.saveConfig(owner, repo, resolvedBranch, token, allowWorkflowEdits)
+        _gitHubConfig.value = saved
+        _gitHubConnectionStatus.value = true to "Saved config for ${saved.owner.ifBlank { "?" }}/${saved.repo.ifBlank { "?" }} (branch: ${saved.effectivePushBranch})."
+        _statusBanner.value = "GitHub settings saved (encrypted token stored locally)."
+        viewModelScope.launch {
+            memoryRepository.logAudit(
+                "GitHub Agent",
+                "SAVE_GITHUB_SETTINGS",
+                2,
+                "ALLOWED",
+                "Saved repo ${saved.owner}/${saved.repo} on branch ${saved.effectivePushBranch} (allowWorkflowEdits=$allowWorkflowEdits)"
+            )
+        }
+        if (saved.isConfigured) {
+            checkForAppUpdate(silent = true)
+        }
+    }
+
+    fun setAllowWorkflowEdits(allowed: Boolean) {
+        gitHubKeyStore.setAllowWorkflowEdits(allowed)
+        _gitHubConfig.value = gitHubKeyStore.loadConfig()
+        _statusBanner.value = if (allowed) {
+            "Workflow edits enabled (.github/workflows/* allowed with approval)."
+        } else {
+            "Workflow edits disabled (hard block active)."
+        }
+    }
+
+    fun testGitHubConnection(
+        ownerInput: String = _gitHubConfig.value.owner,
+        repoInput: String = _gitHubConfig.value.repo,
+        branchInput: String = _gitHubConfig.value.branch,
+        tokenInput: String = _gitHubConfig.value.token
+    ) {
+        val candidateConfig = GitHubConfig(
+            owner = ownerInput.trim(),
+            repo = repoInput.trim(),
+            branch = branchInput.trim().ifBlank { DEFAULT_AURA_BRANCH },
+            token = tokenInput.trim(),
+            allowWorkflowEdits = _gitHubConfig.value.allowWorkflowEdits
+        )
+        viewModelScope.launch {
+            _isTestingGitHub.value = true
+            val result = gitHubClient.testConnection(candidateConfig)
+            _gitHubConnectionStatus.value = result.isOk to result.message
+            _statusBanner.value = result.message
+            memoryRepository.upsertFeatureAudit(
+                com.example.aura.memory.FeatureAuditEntity(
+                    id = "feat_github_autoupdate",
+                    featureName = "GitHub Auto-Build & Self-Update",
+                    moduleName = "github",
+                    status = if (result.isOk) "ACTIVE" else "PARTIAL",
+                    evidenceNote = result.message
+                )
+            )
+            _isTestingGitHub.value = false
+        }
+    }
+
+    fun proposeGitHubFileChange(
+        path: String,
+        newContent: String,
+        commitMessage: String,
+        explanation: String = "",
+        isAutoFix: Boolean = false
+    ) {
+        val cfg = _gitHubConfig.value
+        if (!cfg.isConfigured || cfg.token.isBlank()) {
+            _statusBanner.value = "Configure GitHub Repo owner, Repo name, and Token in Settings first."
+            return
+        }
+        val cleanPath = GitHubPushGuard.normalizeRepoPath(path)
+        val targetBranch = cfg.effectivePushBranch
+
+        viewModelScope.launch {
+            _isPreparingPushProposal.value = true
+            try {
+                val existingRes = gitHubClient.getFileContent(cfg, cleanPath, targetBranch)
+                val existingDraft = existingRes.getOrNull()
+                val draft = GitHubFileDraft(
+                    path = cleanPath,
+                    newContent = newContent,
+                    existingContent = existingDraft?.existingContent,
+                    existingSha = existingDraft?.existingSha
+                )
+                val secrets = geminiKeyStore.getDecryptedKeys() + cfg.token
+                when (val guard = GitHubPushGuard.validateProposal(
+                    files = listOf(draft),
+                    targetBranch = targetBranch,
+                    allowWorkflowEdits = cfg.allowWorkflowEdits,
+                    knownSecrets = secrets
+                )) {
+                    is PushGuardResult.Blocked -> {
+                        _statusBanner.value = guard.reason
+                        memoryRepository.logAudit("Security Agent", "GITHUB_PUSH_BLOCKED", 4, "BLOCKED", guard.reason)
+                    }
+                    is PushGuardResult.Allowed -> {
+                        _pendingGitHubPush.value = PendingGitHubPushProposal(
+                            branch = targetBranch,
+                            commitMessage = commitMessage.ifBlank { "Aura AI: update $cleanPath" },
+                            explanation = explanation.ifBlank {
+                                if (draft.isUpdate) "Update existing file $cleanPath on $targetBranch"
+                                else "Create new file $cleanPath on $targetBranch"
+                            },
+                            files = listOf(draft),
+                            isAutoFixProposal = isAutoFix
+                        )
+                    }
+                }
+            } finally {
+                _isPreparingPushProposal.value = false
+            }
+        }
+    }
+
+    fun askAuraToProposeRepoChange(pathHint: String, changeRequest: String) {
+        val cfg = _gitHubConfig.value
+        if (!cfg.isConfigured || cfg.token.isBlank()) {
+            _statusBanner.value = "Configure GitHub repo owner, name, and token in GitHub Settings first."
+            return
+        }
+        if (changeRequest.isBlank()) {
+            _statusBanner.value = "Describe the code change or file edit for Aura to propose."
+            return
+        }
+        val prefsSnapshot = preferences.value
+        if (shouldPromptForMissingGeminiKey(AiProviderType.FIREBASE_GEMINI.id, prefsSnapshot.intelligenceMode)) {
+            _showMissingGeminiKeyDialog.value = true
+            return
+        }
+
+        viewModelScope.launch {
+            _isPreparingPushProposal.value = true
+            try {
+                val cleanHint = GitHubPushGuard.normalizeRepoPath(pathHint)
+                val existingFile = if (cleanHint.isNotBlank()) {
+                    gitHubClient.getFileContent(cfg, cleanHint, cfg.effectivePushBranch).getOrNull()
+                } else null
+
+                val prompt = buildString {
+                    appendLine("You are AURA AI's Android Kotlin coding engine.")
+                    appendLine("Repository: ${cfg.owner}/${cfg.repo}, branch: ${cfg.effectivePushBranch}")
+                    if (cleanHint.isNotBlank()) appendLine("Target file path: $cleanHint")
+                    if (existingFile?.existingContent != null) {
+                        appendLine("Existing file content:")
+                        appendLine("```")
+                        appendLine(existingFile.existingContent.take(8000))
+                        appendLine("```")
+                    }
+                    appendLine("User instruction: ${changeRequest.trim()}")
+                    appendLine()
+                    appendLine("Respond ONLY with valid JSON with keys:")
+                    appendLine("{\"path\":\"relative/path/in/repo\",\"commitMessage\":\"short commit msg\",\"explanation\":\"1-2 line summary\",\"content\":\"FULL updated file content\"}")
+                    appendLine("Rules: Never include API keys, tokens, keystores, or signing configs. Never touch .github/workflows/* unless explicitly allowed.")
+                }
+
+                val aiResult = aiRouter.generateOnce(
+                    prompt = prompt,
+                    providerId = AiProviderType.FIREBASE_GEMINI.id,
+                    modelId = _selectedGeminiModel.value,
+                    taskType = "github_codegen",
+                    redactSensitiveData = prefsSnapshot.redactSensitiveData,
+                    budgetPolicy = BudgetPolicy(
+                        prefsSnapshot.intelligenceMode,
+                        prefsSnapshot.freeOnlyMode,
+                        prefsSnapshot.dailyBudgetUsd,
+                        prefsSnapshot.dailyTokenLimit
+                    ),
+                    isNetworkAvailable = selfHealing.isNetworkOnline()
+                )
+                aiResult.fold(
+                    onSuccess = { resp ->
+                        val parsed = parseAiCodeProposalJson(resp.text, cleanHint)
+                        if (parsed == null) {
+                            _statusBanner.value = "Aura could not parse a valid file proposal JSON. Try specifying a target file path."
+                        } else {
+                            proposeGitHubFileChange(
+                                path = parsed.first,
+                                newContent = parsed.third,
+                                commitMessage = parsed.second,
+                                explanation = "AI-generated change ready for Approve/Reject review",
+                                isAutoFix = false
+                            )
+                        }
+                    },
+                    onFailure = { err ->
+                        _statusBanner.value = "Aura proposal error: ${err.localizedMessage}"
+                    }
+                )
+            } finally {
+                _isPreparingPushProposal.value = false
+            }
+        }
+    }
+
+    fun approvePendingGitHubPush() {
+        val proposal = _pendingGitHubPush.value ?: return
+        val cfg = _gitHubConfig.value
+        viewModelScope.launch {
+            _isPushingGitHub.value = true
+            val branchRes = gitHubClient.ensureBranchExists(cfg, proposal.branch)
+            if (branchRes.isFailure) {
+                _isPushingGitHub.value = false
+                _statusBanner.value = branchRes.exceptionOrNull()?.message ?: "Failed to prepare branch '${proposal.branch}'."
+                return@launch
+            }
+            val pushRes = gitHubClient.pushApprovedProposal(
+                config = cfg,
+                proposal = proposal,
+                knownSecrets = geminiKeyStore.getDecryptedKeys() + cfg.token
+            )
+            pushRes.fold(
+                onSuccess = { res ->
+                    _pendingGitHubPush.value = null
+                    if (!proposal.isAutoFixProposal) {
+                        _autoFixAttemptCount.value = 0
+                    }
+                    _lastGitHubCommitUrl.value = res.commitUrl
+                    _lastGitHubCommitSha.value = res.commitSha
+                    _canMergeToMain.value = true
+                    _failedJobLogTail.value = ""
+                    _statusBanner.value = "Pushed ${res.pushedPaths.size} file(s) to ${res.branch} (${res.commitSha.take(7)})."
+                    memoryRepository.logAudit(
+                        "GitHub Agent",
+                        "GITHUB_PUSH_APPROVED",
+                        3,
+                        "ALLOWED",
+                        "Pushed ${res.pushedPaths.joinToString()} to ${res.branch} commit ${res.commitSha.take(7)}"
+                    )
+                    startBuildStatusPolling(res.branch)
+                },
+                onFailure = { err ->
+                    _statusBanner.value = err.message ?: "GitHub push failed."
+                }
+            )
+            _isPushingGitHub.value = false
+        }
+    }
+
+    fun rejectPendingGitHubPush() {
+        val proposal = _pendingGitHubPush.value ?: return
+        _pendingGitHubPush.value = null
+        _statusBanner.value = "GitHub push rejected. No files uploaded."
+        viewModelScope.launch {
+            memoryRepository.logAudit(
+                "User Approval",
+                "GITHUB_PUSH_REJECTED",
+                3,
+                "DENIED",
+                "User rejected push for ${proposal.files.joinToString { it.path }}"
+            )
+        }
+    }
+
+    fun mergeAuraBranchToMain() {
+        val cfg = _gitHubConfig.value
+        if (!cfg.isConfigured || cfg.token.isBlank()) {
+            _statusBanner.value = "Configure GitHub settings before merging."
+            return
+        }
+        viewModelScope.launch {
+            _isMergingToMain.value = true
+            val res = gitHubClient.mergeBranchToMain(cfg, cfg.effectivePushBranch)
+            res.fold(
+                onSuccess = { msg ->
+                    _canMergeToMain.value = false
+                    _statusBanner.value = msg
+                    memoryRepository.logAudit("User Approval", "GITHUB_MERGE_TO_MAIN", 3, "ALLOWED", msg)
+                    startBuildStatusPolling("main")
+                },
+                onFailure = { err ->
+                    _statusBanner.value = err.message ?: "Failed to merge into main."
+                }
+            )
+            _isMergingToMain.value = false
+        }
+    }
+
+    fun startBuildStatusPolling(branchOverride: String? = null) {
+        val cfg = _gitHubConfig.value
+        if (!cfg.isConfigured) return
+        val targetBranch = branchOverride ?: cfg.effectivePushBranch
+
+        ciPollingJob?.cancel()
+        ciPollingJob = viewModelScope.launch {
+            _isPollingCi.value = true
+            try {
+                while (isActive) {
+                    val runRes = gitHubClient.fetchLatestWorkflowRun(cfg, targetBranch)
+                    val run = runRes.getOrNull()
+                    if (runRes.isFailure) {
+                        _statusBanner.value = runRes.exceptionOrNull()?.message ?: "CI status check failed."
+                        break
+                    }
+                    if (run != null) {
+                        _ciRunStatus.value = run
+                        when (run.stage) {
+                            CiBuildStage.SUCCESS -> {
+                                _failedJobLogTail.value = ""
+                                _statusBanner.value = "CI build succeeded on ${run.branch} (#${run.runId})."
+                                break
+                            }
+                            CiBuildStage.FAILED -> {
+                                val logRes = gitHubClient.fetchFailedJobLogTail(cfg, run.runId, 30)
+                                _failedJobLogTail.value = logRes.getOrElse { err ->
+                                    "Could not fetch failed job logs: ${err.message}"
+                                }
+                                _statusBanner.value = "CI build failed (#${run.runId}). Review last 30 log lines or Ask Aura to fix."
+                                break
+                            }
+                            CiBuildStage.QUEUED, CiBuildStage.BUILDING, CiBuildStage.IDLE -> Unit
+                        }
+                    }
+                    delay(15_000L)
+                }
+            } finally {
+                _isPollingCi.value = false
+            }
+        }
+    }
+
+    fun refreshBuildStatus(branchOverride: String? = null) {
+        val cfg = _gitHubConfig.value
+        if (!cfg.isConfigured) {
+            _statusBanner.value = "Configure GitHub Repo owner & name in Settings first."
+            return
+        }
+        val targetBranch = branchOverride ?: cfg.effectivePushBranch
+        viewModelScope.launch {
+            val res = gitHubClient.fetchLatestWorkflowRun(cfg, targetBranch)
+            res.fold(
+                onSuccess = { run ->
+                    _ciRunStatus.value = run
+                    if (run == null) {
+                        _statusBanner.value = "No GitHub Actions runs found yet for '$targetBranch'."
+                    } else if (run.stage == CiBuildStage.FAILED) {
+                        val logRes = gitHubClient.fetchFailedJobLogTail(cfg, run.runId, 30)
+                        _failedJobLogTail.value = logRes.getOrElse { "Could not load logs: ${it.message}" }
+                    } else if (run.stage == CiBuildStage.QUEUED || run.stage == CiBuildStage.BUILDING) {
+                        startBuildStatusPolling(targetBranch)
+                    }
+                },
+                onFailure = { err ->
+                    _statusBanner.value = err.message ?: "Failed to fetch Actions run status."
+                }
+            )
+        }
+    }
+
+    fun askAuraToFixFailedBuild() {
+        val cfg = _gitHubConfig.value
+        val logTail = _failedJobLogTail.value
+        if (logTail.isBlank()) {
+            _statusBanner.value = "No failed build log lines available yet."
+            return
+        }
+        if (_autoFixAttemptCount.value >= MAX_AUTO_FIX_ATTEMPTS) {
+            _statusBanner.value = "Max $MAX_AUTO_FIX_ATTEMPTS auto-fix attempts reached for this cycle. Push a manual fix to reset."
+            return
+        }
+        val prefsSnapshot = preferences.value
+        if (shouldPromptForMissingGeminiKey(AiProviderType.FIREBASE_GEMINI.id, prefsSnapshot.intelligenceMode)) {
+            _showMissingGeminiKeyDialog.value = true
+            return
+        }
+
+        viewModelScope.launch {
+            _isAutoFixingBuild.value = true
+            try {
+                val runInfo = _ciRunStatus.value
+                val prompt = buildString {
+                    appendLine("A GitHub Actions Android CI build failed on repo ${cfg.owner}/${cfg.repo} (branch ${cfg.effectivePushBranch}).")
+                    if (runInfo != null) {
+                        appendLine("Workflow: ${runInfo.name}, Run ID: ${runInfo.runId}, Commit: ${runInfo.headSha}")
+                    }
+                    appendLine("Last 30 lines of failed job log:")
+                    appendLine("```")
+                    appendLine(logTail)
+                    appendLine("```")
+                    appendLine("Propose a minimal, safe fix. Return ONLY valid JSON:")
+                    appendLine("{\"path\":\"relative/file/path\",\"commitMessage\":\"fix: brief description\",\"explanation\":\"why this fixes the CI error\",\"content\":\"FULL corrected file content\"}")
+                    appendLine("Never include secrets, tokens, keystores, or signing changes.")
+                }
+
+                val aiResult = aiRouter.generateOnce(
+                    prompt = prompt,
+                    providerId = AiProviderType.FIREBASE_GEMINI.id,
+                    modelId = _selectedGeminiModel.value,
+                    taskType = "ci_autofix",
+                    redactSensitiveData = prefsSnapshot.redactSensitiveData,
+                    budgetPolicy = BudgetPolicy(
+                        prefsSnapshot.intelligenceMode,
+                        prefsSnapshot.freeOnlyMode,
+                        prefsSnapshot.dailyBudgetUsd,
+                        prefsSnapshot.dailyTokenLimit
+                    ),
+                    isNetworkAvailable = selfHealing.isNetworkOnline()
+                )
+                aiResult.fold(
+                    onSuccess = { resp ->
+                        val parsed = parseAiCodeProposalJson(resp.text, "")
+                        if (parsed == null) {
+                            _statusBanner.value = "Aura could not extract a structured fix JSON from Gemini."
+                        } else {
+                            _autoFixAttemptCount.value = _autoFixAttemptCount.value + 1
+                            proposeGitHubFileChange(
+                                path = parsed.first,
+                                newContent = parsed.third,
+                                commitMessage = parsed.second.ifBlank { "fix: resolve CI failure attempt #${_autoFixAttemptCount.value}" },
+                                explanation = "Auto-fix attempt ${_autoFixAttemptCount.value}/$MAX_AUTO_FIX_ATTEMPTS generated from CI failure log",
+                                isAutoFix = true
+                            )
+                        }
+                    },
+                    onFailure = { err ->
+                        _statusBanner.value = "Auto-fix request failed: ${err.localizedMessage}"
+                    }
+                )
+            } finally {
+                _isAutoFixingBuild.value = false
+            }
+        }
+    }
+
+    private fun parseAiCodeProposalJson(raw: String, fallbackPath: String): Triple<String, String, String>? {
+        return runCatching {
+            val trimmed = raw.trim()
+                .removePrefix("```json")
+                .removePrefix("```")
+                .removeSuffix("```")
+                .trim()
+            val startIdx = trimmed.indexOf('{')
+            val endIdx = trimmed.lastIndexOf('}')
+            if (startIdx < 0 || endIdx <= startIdx) return null
+            val json = JSONObject(trimmed.substring(startIdx, endIdx + 1))
+            val path = json.optString("path").ifBlank { fallbackPath }.trim()
+            val commitMsg = json.optString("commitMessage").ifBlank { "Aura AI: update $path" }.trim()
+            val content = json.optString("content")
+            if (path.isBlank() || content.isBlank()) return null
+            Triple(path, commitMsg, content)
+        }.getOrNull()
+    }
+
+    fun checkForAppUpdate(silent: Boolean = false) {
+        val cfg = _gitHubConfig.value
+        if (!cfg.isConfigured) {
+            if (!silent) {
+                _statusBanner.value = "Configure GitHub Repo owner and Repo name in Settings first."
+            }
+            return
+        }
+        viewModelScope.launch {
+            _selfUpdateState.value = _selfUpdateState.value.copy(
+                isChecking = true,
+                errorMessage = null,
+                needsUnknownSourcesPermission = !apkSelfUpdater.canRequestPackageInstalls()
+            )
+            val pairRes = gitHubClient.fetchLatestAndPreviousRelease(cfg)
+            pairRes.fold(
+                onSuccess = { pair ->
+                    val latest = pair.latest
+                    val prev = pair.previous ?: gitHubKeyStore.getPreviousRelease()
+                    if (pair.previous != null) {
+                        gitHubKeyStore.savePreviousRelease(pair.previous)
+                    }
+                    val installedVer = _selfUpdateState.value.installedVersionName
+                    val hasUpdate = latest != null && ApkVersionComparator.isNewerVersion(latest.tagName, installedVer)
+                    val msg = when {
+                        latest == null -> "No GitHub releases published yet."
+                        hasUpdate -> "Update available: ${latest.tagName} (installed v$installedVer)"
+                        else -> "Up to date (installed v$installedVer, latest ${latest.tagName})"
+                    }
+                    _selfUpdateState.value = _selfUpdateState.value.copy(
+                        latestRelease = latest,
+                        previousRelease = prev,
+                        isUpdateAvailable = hasUpdate,
+                        isChecking = false,
+                        statusMessage = msg,
+                        errorMessage = null
+                    )
+                    if (!silent && hasUpdate) {
+                        _statusBanner.value = msg
+                    }
+                },
+                onFailure = { err ->
+                    val errMsg = err.message ?: "Failed to check GitHub releases."
+                    _selfUpdateState.value = _selfUpdateState.value.copy(
+                        isChecking = false,
+                        errorMessage = errMsg,
+                        statusMessage = if (silent) _selfUpdateState.value.statusMessage else errMsg
+                    )
+                    if (!silent) {
+                        _statusBanner.value = errMsg
+                    }
+                }
+            )
+        }
+    }
+
+    fun downloadAndInstallLatestUpdate() {
+        val release = _selfUpdateState.value.latestRelease
+        if (release == null) {
+            _statusBanner.value = "Check for updates first."
+            return
+        }
+        downloadAndInstallRelease(release, isRollback = false)
+    }
+
+    fun rollbackToPreviousRelease() {
+        val prev = _selfUpdateState.value.previousRelease ?: gitHubKeyStore.getPreviousRelease()
+        if (prev == null) {
+            _statusBanner.value = "No previous release APK recorded for rollback."
+            return
+        }
+        downloadAndInstallRelease(prev, isRollback = true)
+    }
+
+    private fun downloadAndInstallRelease(release: GitHubReleaseInfo, isRollback: Boolean) {
+        val asset = release.apkAsset
+        if (asset == null) {
+            val msg = "Release ${release.tagName} has no .apk asset attached."
+            _selfUpdateState.value = _selfUpdateState.value.copy(errorMessage = msg)
+            _statusBanner.value = msg
+            return
+        }
+        if (!apkSelfUpdater.canRequestPackageInstalls()) {
+            val permMsg = "Tap 'Allow from this source' in Android Settings so Aura AI can install APK updates."
+            _selfUpdateState.value = _selfUpdateState.value.copy(
+                needsUnknownSourcesPermission = true,
+                errorMessage = permMsg
+            )
+            _statusBanner.value = permMsg
+            return
+        }
+
+        val cfg = _gitHubConfig.value
+        viewModelScope.launch {
+            _selfUpdateState.value = _selfUpdateState.value.copy(
+                isDownloading = true,
+                downloadProgress = 0f,
+                errorMessage = null,
+                statusMessage = "${if (isRollback) "Downloading rollback" else "Downloading update"} ${release.tagName}..."
+            )
+            val safeFileName = asset.name.replace(Regex("[^A-Za-z0-9._-]"), "_")
+            val destFile = File(File(getApplication<Application>().cacheDir, "aura_updates"), safeFileName)
+
+            val downloadRes = gitHubClient.downloadReleaseApk(
+                config = cfg,
+                assetUrl = asset.apiAssetUrl,
+                destinationFile = destFile,
+                onProgress = { pct ->
+                    _selfUpdateState.value = _selfUpdateState.value.copy(downloadProgress = pct)
+                }
+            )
+            downloadRes.fold(
+                onSuccess = { apkFile ->
+                    // Save current working version & previous release metadata before triggering installer
+                    gitHubKeyStore.saveLastWorkingVersion("v${_selfUpdateState.value.installedVersionName}")
+                    val installOutcome = apkSelfUpdater.installApk(apkFile)
+                    when (installOutcome) {
+                        is ApkInstallResult.SessionStarted -> {
+                            _selfUpdateState.value = _selfUpdateState.value.copy(
+                                isDownloading = false,
+                                downloadProgress = 1f,
+                                lastWorkingVersion = gitHubKeyStore.getLastWorkingVersion(),
+                                needsUnknownSourcesPermission = false,
+                                statusMessage = installOutcome.message,
+                                errorMessage = null
+                            )
+                            _statusBanner.value = installOutcome.message
+                        }
+                        is ApkInstallResult.NeedsUnknownSourcesPermission -> {
+                            _selfUpdateState.value = _selfUpdateState.value.copy(
+                                isDownloading = false,
+                                needsUnknownSourcesPermission = true,
+                                errorMessage = installOutcome.message
+                            )
+                            _statusBanner.value = installOutcome.message
+                        }
+                        is ApkInstallResult.Failed -> {
+                            _selfUpdateState.value = _selfUpdateState.value.copy(
+                                isDownloading = false,
+                                errorMessage = installOutcome.error
+                            )
+                            _statusBanner.value = installOutcome.error
+                        }
+                    }
+                },
+                onFailure = { err ->
+                    val errMsg = err.message ?: "APK download failed."
+                    _selfUpdateState.value = _selfUpdateState.value.copy(
+                        isDownloading = false,
+                        errorMessage = errMsg
+                    )
+                    _statusBanner.value = errMsg
+                }
+            )
+        }
+    }
+
+    fun openUnknownSourcesPermissionSettings() {
+        val opened = apkSelfUpdater.openUnknownSourcesSettings()
+        if (!opened) {
+            _statusBanner.value = "Open Android Settings -> Install unknown apps -> Allow Aura AI."
+        }
+    }
+
+    fun refreshInstallPermissionState() {
+        _selfUpdateState.value = _selfUpdateState.value.copy(
+            needsUnknownSourcesPermission = !apkSelfUpdater.canRequestPackageInstalls()
+        )
+    }
+
     fun dispatchAutomation(command: AutomationCommand) {
         if (emergencyStopActive.value) {
             _statusBanner.value = "Emergency STOP active."
@@ -1024,6 +1820,8 @@ class AuraViewModel(application: Application) : AndroidViewModel(application) {
 
     override fun onCleared() {
         super.onCleared()
+        ciPollingJob?.cancel()
+        expansion.cleanup()
         voiceEngine.release()
     }
 }

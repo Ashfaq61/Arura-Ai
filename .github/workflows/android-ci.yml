@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     permissions:
-      contents: read
+      contents: write
 
     steps:
       - name: Checkout repository
@@ -87,6 +87,7 @@ jobs:
       - name: Build Debug APK
         working-directory: ${{ env.PROJECT_DIR }}
         env:
+          GITHUB_RUN_NUMBER: ${{ github.run_number }}
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
@@ -95,6 +96,7 @@ jobs:
       - name: Build Release APK
         working-directory: ${{ env.PROJECT_DIR }}
         env:
+          GITHUB_RUN_NUMBER: ${{ github.run_number }}
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           STORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
@@ -123,3 +125,41 @@ jobs:
           path: |
             ${{ env.PROJECT_DIR }}/**/build/reports
             ${{ env.PROJECT_DIR }}/**/build/test-results
+
+      - name: Publish Signed Self-Update APK Release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        working-directory: ${{ env.PROJECT_DIR }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          RELEASE_TAG="v1.0.${{ github.run_number }}"
+          APK_SOURCE=$(find . -path "*/build/outputs/apk/debug/*.apk" ! -name "*unsigned*" | head -n 1)
+          if [ -z "$APK_SOURCE" ]; then
+            echo "ERROR: No debug APK found to publish."
+            exit 1
+          fi
+
+          PUBLISH_APK="aura-ai-${RELEASE_TAG}.apk"
+          cp -f "$APK_SOURCE" "$PUBLISH_APK"
+
+          if [ -n "$KEYSTORE_BASE64" ] && [ -f ~/.android/debug.keystore ]; then
+            APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name "apksigner" | sort -V | tail -n 1)
+            if [ -n "$APKSIGNER" ]; then
+              "$APKSIGNER" sign \
+                --ks ~/.android/debug.keystore \
+                --ks-pass "pass:${KEYSTORE_PASSWORD:-android}" \
+                --ks-key-alias "${KEY_ALIAS:-androiddebugkey}" \
+                --key-pass "pass:${KEY_PASSWORD:-android}" \
+                "$PUBLISH_APK"
+            fi
+          fi
+
+          gh release create "$RELEASE_TAG" "$PUBLISH_APK" \
+            --title "Aura AI $RELEASE_TAG" \
+            --notes "Automated Aura AI build #$GITHUB_RUN_NUMBER (versionCode=${{ github.run_number }}, commit=${{ github.sha }})." \
+            --latest || \
+          gh release upload "$RELEASE_TAG" "$PUBLISH_APK" --clobber

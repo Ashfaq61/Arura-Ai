@@ -349,6 +349,22 @@ class AuraOrchestrator(
         )
     }
 
+    fun injectLocalAssistantNote(note: String, userPrompt: String? = null) {
+        if (!userPrompt.isNullOrBlank()) {
+            appendMessage(ChatTurn(role = "USER", text = userPrompt, language = MultilingualDetector.detect(userPrompt)))
+        }
+        appendMessage(
+            ChatTurn(
+                role = "AURA",
+                text = note,
+                providerLabel = "Offline-Local",
+                modelLabel = "aura-offline-emergency",
+                agentsUsed = listOf("Offline Emergency Engine"),
+                loopPhaseTrace = listOf("OFFLINE_EVAL", "EXECUTED")
+            )
+        )
+    }
+
     private fun appendMessage(turn: ChatTurn) {
         _chatMessages.value = _chatMessages.value + turn
     }
