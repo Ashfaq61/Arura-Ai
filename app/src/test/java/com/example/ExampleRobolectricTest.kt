@@ -32,6 +32,8 @@ import com.example.aura.security.PromptInjectionDefender
 import com.example.aura.testing.BenchmarkLabEngine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.ResponseBody.Companion.toResponseBody
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -430,5 +432,120 @@ class ExampleRobolectricTest {
             AiProviderType.LOCAL_OFFLINE.id,
             (localChatPlan.target as com.example.aura.ai.DispatchTarget.AiProvider).routingDecision.providerId
         )
+    }
+
+    @Test
+    fun `gemini key store saves up to 3 keys decrypts updates status and deletes`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val store = com.example.aura.security.GeminiKeyStore(context)
+        store.clearAll()
+
+        val k1 = store.saveKey("AIzaTestKeyNumberOne1111")
+        val k2 = store.saveKey("AIzaTestKeyNumberTwo2222")
+        val k3 = store.saveKey("AIzaTestKeyNumberThree3333")
+        val k4 = store.saveKey("AIzaTestKeyNumberFour4444")
+
+        assertTrue(k1.isSuccess)
+        assertTrue(k2.isSuccess)
+        assertTrue(k3.isSuccess)
+        assertTrue(k4.isFailure)
+        assertEquals(3, store.getKeys().size)
+        assertEquals(
+            listOf("AIzaTestKeyNumberOne1111", "AIzaTestKeyNumberTwo2222", "AIzaTestKeyNumberThree3333"),
+            store.getDecryptedKeys()
+        )
+
+        val firstId = k1.getOrThrow().id
+        store.updateKeyStatus(firstId, "Key valid")
+        assertEquals("Key valid", store.getKeys().first { it.id == firstId }.lastTestStatus)
+
+        store.deleteKey(firstId)
+        assertEquals(2, store.getKeys().size)
+        store.clearAll()
+    }
+
+    @Test
+    fun `gemini rest client handles key validation failover on 429 and clear HTTP errors`() = runTest {
+        val seenUrls = mutableListOf<String>()
+        val mockHttp = okhttp3.OkHttpClient.Builder()
+            .addInterceptor { chain ->
+                val req = chain.request()
+                seenUrls.add(req.url.toString())
+                val key = req.header("x-goog-api-key").orEmpty()
+                val (code, jsonBody) = when (key) {
+                    "rate_limited_key" -> 429 to """{"error":{"message":"Quota exceeded"}}"""
+                    "invalid_key_403" -> 403 to """{"error":{"message":"API key not valid"}}"""
+                    "bad_req_400" -> 400 to """{"error":{"message":"API_KEY_INVALID"}}"""
+                    "offline_key" -> throw java.net.UnknownHostException("generativelanguage.googleapis.com")
+                    else -> 200 to """{"candidates":[{"content":{"parts":[{"text":"Hello from Gemini 2.5 Flash"}]}}]}"""
+                }
+                okhttp3.Response.Builder()
+                    .request(req)
+                    .protocol(okhttp3.Protocol.HTTP_1_1)
+                    .code(code)
+                    .message(if (code == 200) "OK" else "Error")
+                    .body(jsonBody.toResponseBody("application/json".toMediaType()))
+                    .build()
+            }
+            .build()
+
+        val client = com.example.aura.ai.GeminiRestClient(httpClient = mockHttp)
+
+        // Valid key test
+        val validRes = client.testApiKey("valid_key_1")
+        assertTrue(validRes.isValid)
+        assertEquals("Key valid", validRes.message)
+        assertTrue(seenUrls.last().contains("generativelanguage.googleapis.com"))
+        assertTrue(seenUrls.last().contains("gemini-2.5-flash:generateContent"))
+
+        // Error mappings: 400, 403, 429, offline
+        val invalid403 = client.testApiKey("invalid_key_403")
+        assertFalse(invalid403.isValid)
+        assertTrue(invalid403.message.contains("403"))
+
+        val invalid400 = client.testApiKey("bad_req_400")
+        assertFalse(invalid400.isValid)
+        assertTrue(invalid400.message.contains("400"))
+
+        val offlineRes = client.testApiKey("offline_key")
+        assertFalse(offlineRes.isValid)
+        assertTrue(offlineRes.message.contains("No internet", ignoreCase = true))
+
+        // Multi-key 429 failover: key #1 returns 429, key #2 succeeds
+        val failoverRes = client.generateContentWithFailover(
+            keys = listOf("rate_limited_key", "valid_key_2"),
+            prompt = "Hi"
+        )
+        assertTrue(failoverRes.isSuccess)
+        val gen = failoverRes.getOrThrow()
+        assertEquals(1, gen.keyIndexUsed)
+        assertEquals("Hello from Gemini 2.5 Flash", gen.text)
+        assertTrue(gen.failoverNotes.any { it.contains("429") })
+    }
+
+    @Test
+    fun `manifest has INTERNET permission and missing key stops gemini router call`() = runTest {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val pkgInfo = context.packageManager.getPackageInfo(
+            context.packageName,
+            android.content.pm.PackageManager.GET_PERMISSIONS
+        )
+        assertTrue(pkgInfo.requestedPermissions?.contains(android.Manifest.permission.INTERNET) == true)
+
+        val db = AuraDatabase.getInstance(context)
+        val repo = MemoryRepository(db)
+        val keyStore = com.example.aura.security.GeminiKeyStore(context).apply { clearAll() }
+        val router = MultiProviderRouter(
+            vault = AuraKeystoreVault(context),
+            memoryRepository = repo,
+            geminiKeyStore = keyStore
+        )
+        val res = router.generateOnce(
+            prompt = "Hello",
+            providerId = AiProviderType.FIREBASE_GEMINI.id,
+            modelId = com.example.aura.ai.GeminiRestClient.DEFAULT_MODEL
+        )
+        assertTrue(res.isFailure)
+        assertTrue(res.exceptionOrNull()?.message.orEmpty().contains("API key add karo"))
     }
 }

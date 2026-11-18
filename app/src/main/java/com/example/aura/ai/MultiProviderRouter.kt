@@ -5,6 +5,7 @@ import android.util.Log
 import com.example.aura.memory.MemoryRepository
 import com.example.aura.memory.ProviderUsageEntity
 import com.example.aura.security.AuraKeystoreVault
+import com.example.aura.security.GeminiKeyStore
 import com.example.aura.security.PrivacyDataRouter
 import com.google.firebase.Firebase
 import com.google.firebase.ai.ai
@@ -48,7 +49,9 @@ class MultiProviderRouter(
     private val vault: AuraKeystoreVault,
     private val memoryRepository: MemoryRepository,
     private val privacyRouter: PrivacyDataRouter = PrivacyDataRouter(),
-    private val modelRouter: ModelRoutingEngine = ModelRoutingEngine()
+    private val modelRouter: ModelRoutingEngine = ModelRoutingEngine(),
+    private val geminiKeyStore: GeminiKeyStore? = null,
+    private val geminiRestClient: GeminiRestClient = GeminiRestClient()
 ) {
     private val _lastRoutedProviderInfo = MutableStateFlow("Ready • Privacy & Budget Router Armed")
     val lastRoutedProviderInfo: StateFlow<String> = _lastRoutedProviderInfo.asStateFlow()
@@ -114,6 +117,25 @@ class MultiProviderRouter(
             Recent context: $safeMem
             User instruction: $safeInstruction
         """.trimIndent()
+        if (geminiKeyStore != null) {
+            val keys = geminiKeyStore.getDecryptedKeys()
+            if (keys.isEmpty()) {
+                return Result.failure(GeminiRestException(null, "API key add karo"))
+            }
+            val restPrompt = "$prompt\n\nRespond with a single raw JSON object only (no markdown) matching keys: intent, language, summary, assignedAgents, safetyActionType, targetAppOrPackage, actionParameter, steps, clarifyingQuestion."
+            return geminiRestClient.generateContentWithFailover(
+                keys = keys,
+                prompt = restPrompt,
+                modelId = GeminiRestClient.DEFAULT_MODEL
+            ).mapCatching { response ->
+                val cleaned = response.text.trim()
+                    .removePrefix("```json")
+                    .removePrefix("```")
+                    .removeSuffix("```")
+                    .trim()
+                JSONObject(cleaned)
+            }
+        }
         return try {
             val response = withTimeout(45_000L) {
                 geminiPlanner.generateContent(prompt)
@@ -180,8 +202,62 @@ class MultiProviderRouter(
         val redactionNote = if (totalRedactions > 0) " • $totalRedactions secret(s) redacted" else ""
         _lastRoutedProviderInfo.value = "${chosenProvider.displayName} ($resolvedModelId)$redactionNote"
 
-        // Firebase AI Logic (Gemini)
+        // Gemini (User-Key REST API -> gemini-2.5-flash with 429 multi-key failover)
         if (chosenProvider == AiProviderType.FIREBASE_GEMINI) {
+            if (geminiKeyStore != null) {
+                val keys = geminiKeyStore.getDecryptedKeys()
+                if (keys.isEmpty()) {
+                    val missingMsg = "API key add karo: Settings mein apni Gemini API key save karein."
+                    recordUsageSafe(chosenProvider.id, GeminiRestClient.DEFAULT_MODEL, taskType, System.currentTimeMillis() - start, 0, false, missingMsg)
+                    emit(StreamChunk.Error(missingMsg))
+                    return@flow
+                }
+                val restResult = geminiRestClient.generateContentWithFailover(
+                    keys = keys,
+                    prompt = safePrompt,
+                    systemInstruction = safeSys,
+                    imageBitmap = imageBitmap,
+                    modelId = GeminiRestClient.DEFAULT_MODEL
+                )
+                if (restResult.isSuccess) {
+                    val response = restResult.getOrThrow()
+                    val latency = System.currentTimeMillis() - start
+                    val failoverNote = if (response.failoverNotes.isNotEmpty()) " • ${response.failoverNotes.joinToString(" ")}" else ""
+                    _lastRoutedProviderInfo.value = "Gemini (${response.modelUsed}) • Key #${response.keyIndexUsed + 1}$failoverNote$redactionNote"
+                    recordUsageSafe(chosenProvider.id, response.modelUsed, taskType, latency, response.text.length / 4, true)
+                    emit(StreamChunk.Delta(response.text, "Gemini", response.modelUsed))
+                    emit(
+                        StreamChunk.Done(
+                            AiRouterResult(
+                                text = response.text,
+                                providerUsed = "Gemini",
+                                modelUsed = response.modelUsed,
+                                latencyMs = latency,
+                                usedFallback = response.failoverNotes.isNotEmpty(),
+                                routingNote = decision.reason + failoverNote + redactionNote
+                            )
+                        )
+                    )
+                    return@flow
+                } else {
+                    val errEx = restResult.exceptionOrNull()
+                    val httpCode = (errEx as? GeminiRestException)?.httpCode
+                    val err = errEx?.message ?: "Gemini REST API request failed."
+                    recordUsageSafe(chosenProvider.id, GeminiRestClient.DEFAULT_MODEL, taskType, System.currentTimeMillis() - start, 0, false, err)
+                    if (autoFallback && budgetPolicy.intelligenceMode != "LOCAL_ONLY" && httpCode != 400 && httpCode != 403 && httpCode != null) {
+                        val fallbackOutcome = tryFallbackProviders(safePrompt, safeSys, excludeProvider = chosenProvider.id)
+                        if (fallbackOutcome != null) {
+                            _lastRoutedProviderInfo.value = "${fallbackOutcome.providerUsed} (${fallbackOutcome.modelUsed}) [Fallback]$redactionNote"
+                            emit(StreamChunk.Delta(fallbackOutcome.text, fallbackOutcome.providerUsed, fallbackOutcome.modelUsed))
+                            emit(StreamChunk.Done(fallbackOutcome))
+                            return@flow
+                        }
+                    }
+                    emit(StreamChunk.Error(err))
+                    return@flow
+                }
+            }
+
             val firebaseResult = tryStreamFirebaseGemini(safePrompt, safeSys, resolvedModelId, imageBitmap) { partial ->
                 emit(StreamChunk.Delta(partial, chosenProvider.displayName, resolvedModelId))
             }
@@ -291,6 +367,42 @@ class MultiProviderRouter(
         _lastRoutedProviderInfo.value = "${chosen.displayName} ($targetModelId)"
 
         if (chosen == AiProviderType.FIREBASE_GEMINI) {
+            if (geminiKeyStore != null) {
+                val keys = geminiKeyStore.getDecryptedKeys()
+                if (keys.isEmpty()) {
+                    val err = GeminiRestException(null, "API key add karo: Settings mein apni Gemini API key save karein.")
+                    recordUsageSafe(chosen.id, GeminiRestClient.DEFAULT_MODEL, taskType, System.currentTimeMillis() - start, 0, false, err.message)
+                    return Result.failure(err)
+                }
+                return geminiRestClient.generateContentWithFailover(
+                    keys = keys,
+                    prompt = safePrompt,
+                    systemInstruction = safeSys,
+                    imageBitmap = imageBitmap,
+                    modelId = GeminiRestClient.DEFAULT_MODEL
+                ).fold(
+                    onSuccess = { res ->
+                        val latency = System.currentTimeMillis() - start
+                        val failoverNote = if (res.failoverNotes.isNotEmpty()) " • ${res.failoverNotes.joinToString(" ")}" else ""
+                        _lastRoutedProviderInfo.value = "Gemini (${res.modelUsed}) • Key #${res.keyIndexUsed + 1}$failoverNote"
+                        recordUsageSafe(chosen.id, res.modelUsed, taskType, latency, res.text.length / 4, true)
+                        Result.success(
+                            AiRouterResult(
+                                text = res.text,
+                                providerUsed = "Gemini",
+                                modelUsed = res.modelUsed,
+                                latencyMs = latency,
+                                usedFallback = res.failoverNotes.isNotEmpty(),
+                                routingNote = decision.reason + failoverNote
+                            )
+                        )
+                    },
+                    onFailure = { e ->
+                        recordUsageSafe(chosen.id, GeminiRestClient.DEFAULT_MODEL, taskType, System.currentTimeMillis() - start, 0, false, e.message.orEmpty())
+                        Result.failure(e)
+                    }
+                )
+            }
             return try {
                 val model = selectGeminiModel(targetModelId)
                 val fullPrompt = if (safeSys.isBlank()) safePrompt else "$safeSys\n\n$safePrompt"
@@ -336,17 +448,33 @@ class MultiProviderRouter(
         val start = System.currentTimeMillis()
         return when (provider) {
             AiProviderType.FIREBASE_GEMINI -> {
-                val res = generateOnce(
-                    prompt = "Reply with exactly: AURA_OK",
-                    providerId = provider.id,
-                    modelId = "gemini-3.5-flash-lite",
-                    taskType = "diagnostic"
-                )
-                val ms = System.currentTimeMillis() - start
-                res.fold(
-                    onSuccess = { true to "Connected via Firebase App Check (${ms}ms): ${it.text.take(40)}" },
-                    onFailure = { false to "Connection error (${ms}ms): ${it.localizedMessage}" }
-                )
+                if (geminiKeyStore != null) {
+                    val keyToTest = if (slotId != null) {
+                        geminiKeyStore.getDecryptedKey(slotId)
+                    } else {
+                        geminiKeyStore.getDecryptedKeys().firstOrNull()
+                    }
+                    if (keyToTest.isNullOrBlank()) {
+                        return false to "API key add karo: Save a Gemini API key first."
+                    }
+                    val testRes = geminiRestClient.testApiKey(keyToTest, GeminiRestClient.DEFAULT_MODEL)
+                    if (slotId != null) {
+                        geminiKeyStore.updateKeyStatus(slotId, testRes.message)
+                    }
+                    testRes.isValid to testRes.message
+                } else {
+                    val res = generateOnce(
+                        prompt = "Reply with exactly: AURA_OK",
+                        providerId = provider.id,
+                        modelId = "gemini-3.5-flash-lite",
+                        taskType = "diagnostic"
+                    )
+                    val ms = System.currentTimeMillis() - start
+                    res.fold(
+                        onSuccess = { true to "Connected via Firebase App Check (${ms}ms): ${it.text.take(40)}" },
+                        onFailure = { false to "Connection error (${ms}ms): ${it.localizedMessage}" }
+                    )
+                }
             }
             AiProviderType.LOCAL_OFFLINE -> {
                 true to "Offline Deterministic Engine ready (0ms, no network required)."

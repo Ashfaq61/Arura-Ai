@@ -10,11 +10,11 @@ enum class AiProviderType(
 ) {
     FIREBASE_GEMINI(
         id = "FIREBASE_GEMINI",
-        displayName = "Google Gemini (Firebase AI Logic)",
-        requiresApiKey = false,
-        defaultBaseUrl = "firebase://app-check",
-        defaultModels = listOf("gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-4-argon"),
-        description = "Keyless App-Check attested Gemini models with multimodal vision & streaming."
+        displayName = "Gemini",
+        requiresApiKey = true,
+        defaultBaseUrl = "https://generativelanguage.googleapis.com",
+        defaultModels = listOf("gemini-2.5-flash", "gemini-3.8-flash", "gemini-3.5-flash-lite"),
+        description = "Google Gemini REST API (gemini-2.5-flash) using your encrypted API keys with automatic 429 rate-limit failover."
     ),
     GROQ(
         id = "GROQ",

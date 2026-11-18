@@ -19,6 +19,8 @@ import androidx.compose.material.icons.filled.Chat
 import androidx.compose.material.icons.filled.Dashboard
 import androidx.compose.material.icons.filled.SettingsApplications
 import androidx.compose.material.icons.filled.TouchApp
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
@@ -29,6 +31,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -65,6 +68,8 @@ fun AuraRootShell(viewModel: AuraViewModel) {
     val emergencyStop by viewModel.emergencyStopActive.collectAsStateWithLifecycle()
     val pendingApprovals by viewModel.pendingApprovalCount.collectAsStateWithLifecycle()
     val statusBanner by viewModel.statusBanner.collectAsStateWithLifecycle()
+    val showMissingGeminiKeyDialog by viewModel.showMissingGeminiKeyDialog.collectAsStateWithLifecycle()
+    val requestedSystemSubTab by viewModel.requestedSystemSubTab.collectAsStateWithLifecycle()
 
     val snackbarHostState = remember { SnackbarHostState() }
 
@@ -72,6 +77,12 @@ fun AuraRootShell(viewModel: AuraViewModel) {
         val msg = statusBanner ?: return@LaunchedEffect
         snackbarHostState.showSnackbar(msg)
         viewModel.clearBanner()
+    }
+
+    LaunchedEffect(requestedSystemSubTab) {
+        if (requestedSystemSubTab != null) {
+            selectedTab = 4
+        }
     }
 
     if (selectedTab != 0) {
@@ -168,6 +179,34 @@ fun AuraRootShell(viewModel: AuraViewModel) {
                     }
                 }
             }
+        }
+
+        if (showMissingGeminiKeyDialog) {
+            AlertDialog(
+                onDismissRequest = { viewModel.dismissMissingGeminiKeyDialog() },
+                title = { Text("API key add karo") },
+                text = {
+                    Text(
+                        "Gemini AI assistant use karne ke liye Settings mein apni free Gemini API key save karein."
+                    )
+                },
+                confirmButton = {
+                    Button(
+                        onClick = { viewModel.openGeminiSettings() },
+                        modifier = Modifier.testTag("open_settings_for_key_btn")
+                    ) {
+                        Text("Open Settings")
+                    }
+                },
+                dismissButton = {
+                    TextButton(
+                        onClick = { viewModel.dismissMissingGeminiKeyDialog() },
+                        modifier = Modifier.testTag("dismiss_missing_key_dialog_btn")
+                    ) {
+                        Text("Cancel")
+                    }
+                }
+            )
         }
     }
 }

@@ -66,6 +66,20 @@ class ModelRoutingEngine {
         ),
         ModelCapabilityProfile(
             providerId = AiProviderType.FIREBASE_GEMINI.id,
+            modelId = "gemini-2.5-flash",
+            displayName = "Gemini 2.5 Flash",
+            isPaidTier = false,
+            estimatedCostPer1MTokensUsd = 0.0,
+            contextTokens = 1_000_000,
+            avgLatencyMs = 750,
+            supportsTools = true,
+            supportsVision = true,
+            supportsLiveAudio = true,
+            supportsOffline = false,
+            taskStrength = "Fast multimodal Gemini REST model using user API keys"
+        ),
+        ModelCapabilityProfile(
+            providerId = AiProviderType.FIREBASE_GEMINI.id,
             modelId = "gemini-3.5-flash-lite",
             displayName = "Gemini 3.5 Flash-Lite",
             isPaidTier = false,

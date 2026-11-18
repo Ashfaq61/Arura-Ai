@@ -11,6 +11,9 @@ import com.example.aura.ai.AuraLanguage
 import com.example.aura.ai.AuraOrchestrator
 import com.example.aura.ai.BudgetPolicy
 import com.example.aura.ai.ChatTurn
+import com.example.aura.ai.DispatchTarget
+import com.example.aura.ai.GeminiRestClient
+import com.example.aura.ai.IncomingTaskRequest
 import com.example.aura.ai.LocalModelCandidate
 import com.example.aura.ai.ModelRoutingEngine
 import com.example.aura.ai.MultiProviderRouter
@@ -43,6 +46,8 @@ import com.example.aura.memory.SkillProcedureEntity
 import com.example.aura.research.GitHubAndHfResearchClient
 import com.example.aura.security.ApiKeySlot
 import com.example.aura.security.AuraKeystoreVault
+import com.example.aura.security.GeminiKeyEntry
+import com.example.aura.security.GeminiKeyStore
 import com.example.aura.security.PermissionGuard
 import com.example.aura.security.PrivacyDataRouter
 import com.example.aura.security.PromptInjectionDefender
@@ -66,6 +71,8 @@ class AuraViewModel(application: Application) : AndroidViewModel(application) {
     val memoryRepository = MemoryRepository(db)
     val preferencesRepository = PreferencesRepository(application)
     val vault = AuraKeystoreVault(application)
+    val geminiKeyStore = GeminiKeyStore(application)
+    val geminiRestClient = GeminiRestClient()
     val permissionGuard = PermissionGuard()
     val agentNetwork = AgentNetworkManager()
     val deviceControl = DeviceControlEngine(application)
@@ -75,7 +82,14 @@ class AuraViewModel(application: Application) : AndroidViewModel(application) {
     val modelRouter = ModelRoutingEngine()
     val selfHealing = SelfHealingEngine(application)
 
-    val aiRouter = MultiProviderRouter(vault, memoryRepository, privacyRouter, modelRouter)
+    val aiRouter = MultiProviderRouter(
+        vault = vault,
+        memoryRepository = memoryRepository,
+        privacyRouter = privacyRouter,
+        modelRouter = modelRouter,
+        geminiKeyStore = geminiKeyStore,
+        geminiRestClient = geminiRestClient
+    )
     val toolFactory = ToolFactoryAndEvolutionEngine(
         aiRouter, researchClient, memoryRepository, agentNetwork, permissionGuard, deviceControl
     )
@@ -183,6 +197,21 @@ class AuraViewModel(application: Application) : AndroidViewModel(application) {
     private val _apiSlots = MutableStateFlow(vault.loadAllSlotsMetadata())
     val apiSlots: StateFlow<List<ApiKeySlot>> = _apiSlots.asStateFlow()
 
+    private val _geminiKeys = MutableStateFlow(geminiKeyStore.getKeys())
+    val geminiKeys: StateFlow<List<GeminiKeyEntry>> = _geminiKeys.asStateFlow()
+
+    private val _geminiKeyTestStatus = MutableStateFlow<Pair<Boolean, String>?>(null)
+    val geminiKeyTestStatus: StateFlow<Pair<Boolean, String>?> = _geminiKeyTestStatus.asStateFlow()
+
+    private val _isTestingGeminiKey = MutableStateFlow(false)
+    val isTestingGeminiKey: StateFlow<Boolean> = _isTestingGeminiKey.asStateFlow()
+
+    private val _showMissingGeminiKeyDialog = MutableStateFlow(false)
+    val showMissingGeminiKeyDialog: StateFlow<Boolean> = _showMissingGeminiKeyDialog.asStateFlow()
+
+    private val _requestedSystemSubTab = MutableStateFlow<Int?>(null)
+    val requestedSystemSubTab: StateFlow<Int?> = _requestedSystemSubTab.asStateFlow()
+
     private val _statusBanner = MutableStateFlow<String?>(null)
     val statusBanner: StateFlow<String?> = _statusBanner.asStateFlow()
 
@@ -219,13 +248,32 @@ class AuraViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun sendCommand(text: String, speakReply: Boolean = false, attachedBitmap: Bitmap? = null) {
+        val trimmed = text.trim()
+        if (trimmed.isEmpty() && attachedBitmap == null) return
+
+        val prefsSnapshot = preferences.value
+        val quickPlan = orchestrator.taskDispatcher.evaluateIntent(
+            IncomingTaskRequest(
+                rawInstruction = trimmed,
+                attachedBitmap = attachedBitmap,
+                prefs = prefsSnapshot,
+                isNetworkAvailable = selfHealing.isNetworkOnline()
+            )
+        )
+        val routesToAi = quickPlan.target is DispatchTarget.AiProvider ||
+            quickPlan.target is DispatchTarget.HybridVisionProvider
+        if (routesToAi && shouldPromptForMissingGeminiKey(prefsSnapshot.activeProviderId, prefsSnapshot.intelligenceMode)) {
+            _showMissingGeminiKeyDialog.value = true
+            return
+        }
+
         activeJob?.cancel()
         activeJob = viewModelScope.launch {
             _isBusy.value = true
             voiceEngine.setOrbState(VoiceOrbState.THINKING)
             try {
                 orchestrator.processInstruction(
-                    instruction = text,
+                    instruction = trimmed,
                     prefs = preferences.value,
                     attachedBitmap = attachedBitmap,
                     onSpeakReply = { reply, lang ->
@@ -305,14 +353,18 @@ class AuraViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun analyzeCameraBitmap(bitmap: Bitmap, prompt: String) {
+        val p = preferences.value
+        if (shouldPromptForMissingGeminiKey(AiProviderType.FIREBASE_GEMINI.id, p.intelligenceMode)) {
+            _showMissingGeminiKeyDialog.value = true
+            return
+        }
         viewModelScope.launch {
             _isBusy.value = true
-            _visionAnalysis.value = "Analyzing image with ${preferences.value.activeModelId}..."
-            val p = preferences.value
+            _visionAnalysis.value = "Analyzing image with ${GeminiRestClient.DEFAULT_MODEL}..."
             val res = aiRouter.generateOnce(
                 prompt = prompt.ifBlank { "Describe everything visible, read all text (OCR), and list actionable UI elements." },
                 providerId = AiProviderType.FIREBASE_GEMINI.id,
-                modelId = "gemini-3.8-flash",
+                modelId = GeminiRestClient.DEFAULT_MODEL,
                 imageBitmap = bitmap,
                 taskType = "vision",
                 redactSensitiveData = p.redactSensitiveData,
@@ -328,6 +380,11 @@ class AuraViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun loadAndSummarizeDocument(uri: Uri) {
+        val p = preferences.value
+        if (shouldPromptForMissingGeminiKey(p.activeProviderId, p.intelligenceMode)) {
+            _showMissingGeminiKeyDialog.value = true
+            return
+        }
         viewModelScope.launch {
             _isBusy.value = true
             _documentSummary.value = "Reading document..."
@@ -591,6 +648,89 @@ class AuraViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private fun shouldPromptForMissingGeminiKey(providerId: String, intelligenceMode: String): Boolean {
+        return providerId == AiProviderType.FIREBASE_GEMINI.id &&
+            intelligenceMode != "LOCAL_ONLY" &&
+            !geminiKeyStore.hasAnyKey()
+    }
+
+    fun dismissMissingGeminiKeyDialog() {
+        _showMissingGeminiKeyDialog.value = false
+    }
+
+    fun openGeminiSettings() {
+        _showMissingGeminiKeyDialog.value = false
+        _requestedSystemSubTab.value = 3
+    }
+
+    fun consumeRequestedSystemSubTab() {
+        _requestedSystemSubTab.value = null
+    }
+
+    fun saveGeminiApiKey(rawKey: String, customLabel: String = ""): Boolean {
+        val result = geminiKeyStore.saveKey(rawKey, customLabel)
+        return result.fold(
+            onSuccess = { entry ->
+                _geminiKeys.value = geminiKeyStore.getKeys()
+                _geminiKeyTestStatus.value = true to "Saved ${entry.label} (${entry.maskedPreview}). Tap Test Key to verify."
+                _statusBanner.value = "Gemini API key saved."
+                viewModelScope.launch {
+                    memoryRepository.logAudit("Security Agent", "SAVE_GEMINI_API_KEY", 2, "ALLOWED", "Encrypted Gemini key '${entry.label}' saved (${entry.maskedPreview}).")
+                }
+                true
+            },
+            onFailure = { err ->
+                val msg = err.message ?: "Failed to save Gemini API key."
+                _geminiKeyTestStatus.value = false to msg
+                _statusBanner.value = msg
+                false
+            }
+        )
+    }
+
+    fun testGeminiApiKey(rawKeyInput: String = "", keyId: String? = null) {
+        val candidateKey = when {
+            keyId != null -> geminiKeyStore.getDecryptedKey(keyId)
+            rawKeyInput.isNotBlank() -> rawKeyInput.trim()
+            else -> geminiKeyStore.getDecryptedKeys().firstOrNull()
+        }
+        if (candidateKey.isNullOrBlank()) {
+            _geminiKeyTestStatus.value = false to "API key add karo: Enter or save a Gemini API key first."
+            return
+        }
+
+        viewModelScope.launch {
+            _isTestingGeminiKey.value = true
+            val res = geminiRestClient.testApiKey(candidateKey, GeminiRestClient.DEFAULT_MODEL)
+            _geminiKeyTestStatus.value = res.isValid to res.message
+            val targetId = keyId ?: if (rawKeyInput.isBlank()) geminiKeyStore.getKeys().firstOrNull()?.id else null
+            if (targetId != null) {
+                geminiKeyStore.updateKeyStatus(targetId, res.message)
+                _geminiKeys.value = geminiKeyStore.getKeys()
+            }
+            memoryRepository.upsertFeatureAudit(
+                com.example.aura.memory.FeatureAuditEntity(
+                    id = "feat_ai_gemini",
+                    featureName = "Gemini REST API (gemini-2.5-flash)",
+                    moduleName = "ai",
+                    status = if (res.isValid) "ACTIVE" else "PARTIAL",
+                    evidenceNote = res.message
+                )
+            )
+            _isTestingGeminiKey.value = false
+        }
+    }
+
+    fun deleteGeminiApiKey(keyId: String) {
+        geminiKeyStore.deleteKey(keyId)
+        val remaining = geminiKeyStore.getKeys()
+        _geminiKeys.value = remaining
+        if (remaining.isEmpty()) {
+            _geminiKeyTestStatus.value = null
+        }
+        _statusBanner.value = "Gemini API key removed."
+    }
+
     fun saveApiKeySlot(providerId: String, label: String, rawKey: String, baseUrl: String, model: String) {
         val slot = ApiKeySlot(
             providerId = providerId,
@@ -611,11 +751,12 @@ class AuraViewModel(application: Application) : AndroidViewModel(application) {
             _isBusy.value = true
             val (ok, msg) = aiRouter.testProviderConnection(provider, slotId)
             _apiSlots.value = vault.loadAllSlotsMetadata()
+            _geminiKeys.value = geminiKeyStore.getKeys()
             _statusBanner.value = msg
             memoryRepository.upsertFeatureAudit(
                 com.example.aura.memory.FeatureAuditEntity(
                     id = if (provider == AiProviderType.FIREBASE_GEMINI) "feat_ai_gemini" else "feat_multi_provider",
-                    featureName = if (provider == AiProviderType.FIREBASE_GEMINI) "Gemini Cloud Brain & Streaming" else "Model Router, Budget & Free-Only Guard",
+                    featureName = if (provider == AiProviderType.FIREBASE_GEMINI) "Gemini REST API (gemini-2.5-flash)" else "Model Router, Budget & Free-Only Guard",
                     moduleName = "ai",
                     status = if (ok) "ACTIVE" else "PARTIAL",
                     evidenceNote = msg

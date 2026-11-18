@@ -1,6 +1,10 @@
 package com.example.aura.ui.screens
 
+import android.content.Intent
+import android.net.Uri
+import android.widget.Toast
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -23,12 +27,16 @@ import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Verified
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -39,6 +47,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -46,14 +55,18 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.aura.ai.AiProviderType
 import com.example.aura.ai.AuraVoiceCatalog
 import com.example.aura.security.ActionSafetyLevel
+import com.example.aura.security.GeminiKeyStore
 import com.example.aura.ui.AuraViewModel
 import com.example.aura.ui.components.StatusPill
 import com.example.ui.theme.AuraThemeMode
@@ -62,7 +75,16 @@ import com.example.ui.theme.AuraThemeMode
 @Composable
 fun SystemCenterScreen(viewModel: AuraViewModel) {
     var subTab by remember { mutableIntStateOf(0) }
+    val requestedSubTab by viewModel.requestedSystemSubTab.collectAsStateWithLifecycle()
     val tabs = listOf("Marketplace", "Memory", "Security", "API, Cost & Voices", "Observability & Bench", "Audit & Info")
+
+    LaunchedEffect(requestedSubTab) {
+        val target = requestedSubTab ?: return@LaunchedEffect
+        if (target in tabs.indices) {
+            subTab = target
+        }
+        viewModel.consumeRequestedSystemSubTab()
+    }
 
     Column(modifier = Modifier.fillMaxSize()) {
         PrimaryScrollableTabRow(selectedTabIndex = subTab, edgePadding = 12.dp) {
@@ -404,9 +426,16 @@ private fun SecurityCenterTab(viewModel: AuraViewModel) {
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun ApiAndVoiceSettingsTab(viewModel: AuraViewModel) {
+    val context = LocalContext.current
     val prefs by viewModel.preferences.collectAsStateWithLifecycle()
     val slots by viewModel.apiSlots.collectAsStateWithLifecycle()
     val usage by viewModel.providerUsage.collectAsStateWithLifecycle()
+    val geminiKeys by viewModel.geminiKeys.collectAsStateWithLifecycle()
+    val geminiTestStatus by viewModel.geminiKeyTestStatus.collectAsStateWithLifecycle()
+    val isTestingGeminiKey by viewModel.isTestingGeminiKey.collectAsStateWithLifecycle()
+
+    var geminiKeyInput by remember { mutableStateOf("") }
+    var showGeminiKey by remember { mutableStateOf(false) }
 
     var selectedSlotProvider by remember { mutableStateOf(AiProviderType.GROQ) }
     var keyLabel by remember { mutableStateOf("") }
@@ -419,11 +448,7 @@ private fun ApiAndVoiceSettingsTab(viewModel: AuraViewModel) {
         verticalArrangement = Arrangement.spacedBy(12.dp),
         modifier = Modifier.fillMaxSize()
     ) {
-        item {
-            PrivacyAndRoutingCard(viewModel)
-        }
-
-        // Active Provider & Model
+        // AI Provider & Gemini API Key Section
         item {
             Card(
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
@@ -431,7 +456,7 @@ private fun ApiAndVoiceSettingsTab(viewModel: AuraViewModel) {
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Column(modifier = Modifier.padding(14.dp)) {
-                    Text("Active AI Provider & Model Routing", style = MaterialTheme.typography.titleMedium)
+                    Text("AI Provider", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                     Spacer(modifier = Modifier.height(8.dp))
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         AiProviderType.entries.forEach { provider ->
@@ -440,7 +465,8 @@ private fun ApiAndVoiceSettingsTab(viewModel: AuraViewModel) {
                                 onClick = {
                                     viewModel.setProviderAndModel(provider.id, provider.defaultModels.first())
                                 },
-                                label = { Text(provider.displayName.substringBefore(" (")) }
+                                label = { Text(provider.displayName.substringBefore(" (")) },
+                                modifier = Modifier.testTag("provider_chip_${provider.id.lowercase()}")
                             )
                         }
                     }
@@ -457,6 +483,185 @@ private fun ApiAndVoiceSettingsTab(viewModel: AuraViewModel) {
                             )
                         }
                     }
+
+                    if (activeProvider == AiProviderType.FIREBASE_GEMINI) {
+                        Spacer(modifier = Modifier.height(12.dp))
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f))
+                        Spacer(modifier = Modifier.height(12.dp))
+
+                        Row(
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                "Gemini API Key (${geminiKeys.size}/${GeminiKeyStore.MAX_KEYS})",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            StatusPill(
+                                text = if (geminiKeys.isEmpty()) "No Key" else "429 Auto-Failover",
+                                accent = if (geminiKeys.isEmpty()) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.tertiary
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        OutlinedTextField(
+                            value = geminiKeyInput,
+                            onValueChange = { geminiKeyInput = it },
+                            label = { Text("Gemini API Key") },
+                            placeholder = { Text("Paste key from Google AI Studio") },
+                            singleLine = true,
+                            visualTransformation = if (showGeminiKey) VisualTransformation.None else PasswordVisualTransformation(),
+                            trailingIcon = {
+                                IconButton(
+                                    onClick = { showGeminiKey = !showGeminiKey },
+                                    modifier = Modifier.testTag("toggle_gemini_key_visibility_btn")
+                                ) {
+                                    Icon(
+                                        imageVector = if (showGeminiKey) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                                        contentDescription = if (showGeminiKey) "Hide API key" else "Show API key"
+                                    )
+                                }
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("gemini_api_key_input")
+                        )
+
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Button(
+                                onClick = {
+                                    if (viewModel.saveGeminiApiKey(geminiKeyInput)) {
+                                        geminiKeyInput = ""
+                                    }
+                                },
+                                enabled = geminiKeyInput.isNotBlank() && geminiKeys.size < GeminiKeyStore.MAX_KEYS,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("save_gemini_key_btn")
+                            ) {
+                                Text("Save")
+                            }
+                            OutlinedButton(
+                                onClick = { viewModel.testGeminiApiKey(geminiKeyInput) },
+                                enabled = !isTestingGeminiKey && (geminiKeyInput.isNotBlank() || geminiKeys.isNotEmpty()),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("test_gemini_key_btn")
+                            ) {
+                                if (isTestingGeminiKey) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(16.dp),
+                                        strokeWidth = 2.dp
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("Testing...")
+                                } else {
+                                    Text("Test Key")
+                                }
+                            }
+                        }
+
+                        geminiTestStatus?.let { (isOk, msg) ->
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = msg,
+                                style = MaterialTheme.typography.bodySmall,
+                                fontWeight = FontWeight.Medium,
+                                color = if (isOk) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.error,
+                                modifier = Modifier.testTag("gemini_key_test_status")
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Text(
+                            text = "Get free Gemini API key",
+                            style = MaterialTheme.typography.bodyMedium.copy(
+                                fontWeight = FontWeight.SemiBold,
+                                textDecoration = TextDecoration.Underline
+                            ),
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    val opened = runCatching {
+                                        val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://aistudio.google.com/apikey"))
+                                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                        context.startActivity(intent)
+                                    }.isSuccess
+                                    if (!opened) {
+                                        Toast.makeText(context, "No browser app found to open Google AI Studio.", Toast.LENGTH_SHORT).show()
+                                    }
+                                }
+                                .padding(vertical = 12.dp)
+                                .testTag("get_free_gemini_key_link")
+                        )
+                        Text(
+                            text = "1) link kholo aur Google account se login karo\n2) \"Create API key\" dabao\n3) key copy karke yahan paste karo",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+
+                        if (geminiKeys.isNotEmpty()) {
+                            Spacer(modifier = Modifier.height(12.dp))
+                            Text(
+                                text = "Saved Gemini Keys (auto-failover on HTTP 429)",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Spacer(modifier = Modifier.height(6.dp))
+                            geminiKeys.forEach { entry ->
+                                Card(
+                                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 3.dp)
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier.padding(10.dp)
+                                    ) {
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                "${entry.label} • ${entry.maskedPreview}",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                fontWeight = FontWeight.SemiBold
+                                            )
+                                            Text(
+                                                entry.lastTestStatus,
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = if (entry.lastTestStatus == "Key valid") {
+                                                    MaterialTheme.colorScheme.tertiary
+                                                } else {
+                                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                                }
+                                            )
+                                        }
+                                        OutlinedButton(
+                                            onClick = { viewModel.testGeminiApiKey(keyId = entry.id) },
+                                            enabled = !isTestingGeminiKey
+                                        ) {
+                                            Text("Test")
+                                        }
+                                        IconButton(onClick = { viewModel.deleteGeminiApiKey(entry.id) }) {
+                                            Icon(
+                                                Icons.Filled.Delete,
+                                                contentDescription = "Delete Gemini key",
+                                                tint = MaterialTheme.colorScheme.error
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     Spacer(modifier = Modifier.height(8.dp))
                     Row(
                         horizontalArrangement = Arrangement.SpaceBetween,
@@ -466,15 +671,21 @@ private fun ApiAndVoiceSettingsTab(viewModel: AuraViewModel) {
                         Text("Automatic Provider Fallback", style = MaterialTheme.typography.bodyMedium)
                         Switch(checked = prefs.autoFallbackProviders, onCheckedChange = { viewModel.setAutoFallback(it) })
                     }
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Button(
-                        onClick = { viewModel.testProvider(activeProvider) },
-                        modifier = Modifier.testTag("test_active_provider_btn")
-                    ) {
-                        Text("Test Active Provider Connection")
+                    if (activeProvider != AiProviderType.FIREBASE_GEMINI) {
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Button(
+                            onClick = { viewModel.testProvider(activeProvider) },
+                            modifier = Modifier.testTag("test_active_provider_btn")
+                        ) {
+                            Text("Test Active Provider Connection")
+                        }
                     }
                 }
             }
+        }
+
+        item {
+            PrivacyAndRoutingCard(viewModel)
         }
 
         // Voice Selection (Kore, Aoede, Zephyr, Leda, Callirrhoe, Autonoe)
