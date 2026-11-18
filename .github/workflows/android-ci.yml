@@ -39,13 +39,17 @@ jobs:
         run: ./gradlew :app:assembleDebug --stacktrace
 
       - name: Build Release APK (when signing secrets configured)
-        if: ${{ secrets.KEYSTORE_BASE64 != '' }}
         env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
           STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
-          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > my-upload-key.jks
-          ./gradlew :app:assembleRelease --stacktrace
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > my-upload-key.jks
+            ./gradlew :app:assembleRelease --stacktrace
+          else
+            echo "Skipping Release APK build: KEYSTORE_BASE64 secret not configured."
+          fi
 
       - name: Upload Debug APK Artifact
         uses: actions/upload-artifact@v4

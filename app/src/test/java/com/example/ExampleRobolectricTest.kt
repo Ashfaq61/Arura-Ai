@@ -327,4 +327,24 @@ class ExampleRobolectricTest {
         controller.destroy()
         assertFalse(AccessibilityBridge.isServiceConnected.value)
     }
+
+    @Test
+    fun `manifest declares AuraAccessibilityService with bind permission and xml config`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val component = android.content.ComponentName(context, AuraAccessibilityService::class.java)
+        val serviceInfo = context.packageManager.getServiceInfo(
+            component,
+            android.content.pm.PackageManager.GET_META_DATA
+        )
+
+        assertEquals(android.Manifest.permission.BIND_ACCESSIBILITY_SERVICE, serviceInfo.permission)
+        assertTrue(serviceInfo.exported)
+        val configResId = serviceInfo.metaData?.getInt("android.accessibilityservice") ?: 0
+        assertEquals(R.xml.accessibility_service_config, configResId)
+
+        val resolveIntent = android.content.Intent("android.accessibilityservice.AccessibilityService")
+            .setPackage(context.packageName)
+        val resolved = context.packageManager.queryIntentServices(resolveIntent, 0)
+        assertTrue(resolved.any { it.serviceInfo.name == AuraAccessibilityService::class.java.name })
+    }
 }
