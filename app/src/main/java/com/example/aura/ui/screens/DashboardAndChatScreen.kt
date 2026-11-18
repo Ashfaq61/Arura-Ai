@@ -103,6 +103,7 @@ fun CoreDashboardScreen(
     val loopPhase by viewModel.currentLoopPhase.collectAsStateWithLifecycle()
     val continuousVoice by viewModel.continuousVoice.collectAsStateWithLifecycle()
     val routedInfo by viewModel.lastRoutedProviderInfo.collectAsStateWithLifecycle()
+    val activeVoiceIndicator by viewModel.activeVoiceIndicator.collectAsStateWithLifecycle()
 
     val micPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -164,13 +165,21 @@ fun CoreDashboardScreen(
                             .fillMaxWidth()
                             .padding(20.dp)
                     ) {
-                        Row(
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically,
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
                             modifier = Modifier.fillMaxWidth()
                         ) {
                             StatusPill(text = "LOOP: $loopPhase", accent = MaterialTheme.colorScheme.primary)
-                            StatusPill(text = "VOICE: ${prefs.activeVoiceName}", accent = MaterialTheme.colorScheme.secondary)
+                            StatusPill(
+                                text = activeVoiceIndicator,
+                                accent = if (activeVoiceIndicator.startsWith("Voice: Fallback")) {
+                                    MaterialTheme.colorScheme.error
+                                } else {
+                                    MaterialTheme.colorScheme.secondary
+                                },
+                                modifier = Modifier.testTag("core_voice_indicator")
+                            )
                         }
 
                         Spacer(modifier = Modifier.height(12.dp))

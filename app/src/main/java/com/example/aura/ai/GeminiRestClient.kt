@@ -19,6 +19,7 @@ import java.net.UnknownHostException
 import java.util.concurrent.TimeUnit
 
 const val GEMINI_DEFAULT_MODEL = "gemini-3.8-flash"
+const val GEMINI_TTS_DEFAULT_MODEL = "gemini-2.5-flash-preview-tts"
 
 data class GeminiTestResult(
     val isValid: Boolean,
@@ -30,6 +31,15 @@ data class GeminiTestResult(
 
 data class GeminiGenerationResponse(
     val text: String,
+    val modelUsed: String,
+    val keyIndexUsed: Int,
+    val failoverNotes: List<String> = emptyList(),
+    val errorNotice: String? = null
+)
+
+data class GeminiTtsAudioResponse(
+    val audioBytes: ByteArray,
+    val mimeType: String,
     val modelUsed: String,
     val keyIndexUsed: Int,
     val failoverNotes: List<String> = emptyList(),
@@ -367,6 +377,301 @@ class GeminiRestClient(
         }
     }
 
+    suspend fun synthesizeSpeechWithFailover(
+        keys: List<String>,
+        text: String,
+        voiceName: String = "Kore",
+        modelId: String = GEMINI_TTS_DEFAULT_MODEL,
+        onModelError: (suspend (String) -> Unit)? = null,
+        onModelFallback: (suspend (String) -> Unit)? = null
+    ): Result<GeminiTtsAudioResponse> {
+        val validCandidates = keys.map { it.trim() }.filter { it.isNotBlank() }
+        if (validCandidates.isEmpty()) {
+            return Result.failure(GeminiRestException(null, "API key add karo: No Gemini API key saved."))
+        }
+
+        var activeModel = modelId.trim().ifBlank { GEMINI_TTS_DEFAULT_MODEL }
+        val resolvedVoice = voiceName.trim().ifBlank { "Kore" }
+        var hasAttemptedModelFallback = false
+        var captured404Notice: String? = null
+        val failoverNotes = mutableListOf<String>()
+        var lastError: Throwable? = null
+
+        for ((index, key) in validCandidates.withIndex()) {
+            var attempt = synthesizeSpeechSingleKey(
+                apiKey = key,
+                text = text,
+                voiceName = resolvedVoice,
+                modelId = activeModel
+            )
+
+            val initialCode = (attempt.exceptionOrNull() as? GeminiRestException)?.httpCode
+            if (attempt.isFailure && initialCode == 404 && !hasAttemptedModelFallback) {
+                hasAttemptedModelFallback = true
+                val err404Msg = attempt.exceptionOrNull()?.message
+                    ?: mapHttpError(404, "TTS model '$activeModel' not found.")
+                captured404Notice = err404Msg
+                failoverNotes.add(err404Msg)
+                onModelError?.invoke(err404Msg)
+
+                val discovered = fetchFirstAudioTtsModel(key, excludeModel = activeModel)
+                if (discovered.isSuccess) {
+                    val fallbackModel = discovered.getOrThrow()
+                    failoverNotes.add("Auto-switched TTS model from '$activeModel' to '$fallbackModel' via ListModels.")
+                    activeModel = fallbackModel
+                    onModelFallback?.invoke(fallbackModel)
+                    attempt = synthesizeSpeechSingleKey(
+                        apiKey = key,
+                        text = text,
+                        voiceName = resolvedVoice,
+                        modelId = activeModel
+                    )
+                } else {
+                    val listErr = discovered.exceptionOrNull()?.message
+                    val combinedMsg = if (!listErr.isNullOrBlank()) "$err404Msg ($listErr)" else err404Msg
+                    return Result.failure(GeminiRestException(404, combinedMsg))
+                }
+            }
+
+            if (attempt.isSuccess) {
+                val (bytes, mimeType) = attempt.getOrThrow()
+                return Result.success(
+                    GeminiTtsAudioResponse(
+                        audioBytes = bytes,
+                        mimeType = mimeType,
+                        modelUsed = activeModel,
+                        keyIndexUsed = index,
+                        failoverNotes = failoverNotes,
+                        errorNotice = captured404Notice
+                    )
+                )
+            }
+
+            val err = attempt.exceptionOrNull()
+            lastError = err
+            val httpCode = (err as? GeminiRestException)?.httpCode
+            if (httpCode == 429 && index < validCandidates.lastIndex) {
+                failoverNotes.add("TTS Key #${index + 1} hit rate limit (HTTP 429); retrying with Key #${index + 2}.")
+                continue
+            }
+            if (httpCode == 429) {
+                failoverNotes.add("TTS Key #${index + 1} hit rate limit (HTTP 429).")
+                continue
+            }
+            if (httpCode == null) {
+                return Result.failure(err ?: GeminiRestException(null, "No internet connection."))
+            }
+            if ((httpCode == 400 || httpCode == 403) && index < validCandidates.lastIndex) {
+                failoverNotes.add("TTS Key #${index + 1} rejected (HTTP $httpCode); trying Key #${index + 2}.")
+                continue
+            }
+            return Result.failure(err ?: GeminiRestException(httpCode, "Gemini TTS request failed."))
+        }
+
+        return Result.failure(
+            lastError ?: GeminiRestException(429, "Rate limit reached (HTTP 429) on all saved keys.")
+        )
+    }
+
+    suspend fun fetchFirstAudioTtsModel(
+        apiKey: String,
+        excludeModel: String? = null
+    ): Result<String> = withContext(Dispatchers.IO) {
+        try {
+            val parsedBase = baseUrl.toHttpUrlOrNull()
+                ?: return@withContext Result.failure(GeminiRestException(null, "Invalid Gemini base URL: $baseUrl"))
+            val listUrl = parsedBase.newBuilder()
+                .addPathSegment("v1beta")
+                .addPathSegment("models")
+                .addQueryParameter("key", apiKey.trim())
+                .build()
+
+            val request = Request.Builder()
+                .url(listUrl)
+                .get()
+                .build()
+
+            httpClient.newCall(request).execute().use { response ->
+                val rawBody = response.body?.string().orEmpty()
+                if (!response.isSuccessful) {
+                    val detail = extractApiErrorMessage(rawBody)
+                    return@withContext Result.failure(
+                        GeminiRestException(response.code, mapHttpError(response.code, detail))
+                    )
+                }
+                val models = JSONObject(rawBody).optJSONArray("models")
+                    ?: return@withContext Result.failure(
+                        GeminiRestException(404, "ListModels returned no available models.")
+                    )
+
+                var audioFallbackCandidate: String? = null
+
+                for (i in 0 until models.length()) {
+                    val obj = models.optJSONObject(i) ?: continue
+                    val cleanId = obj.optString("name").removePrefix("models/").trim()
+                    if (cleanId.isBlank()) continue
+                    if (excludeModel != null && cleanId.equals(excludeModel, ignoreCase = true)) continue
+
+                    val methods = obj.optJSONArray("supportedGenerationMethods") ?: continue
+                    var supportsGenerateContent = false
+                    var supportsGenerateAudio = false
+                    for (m in 0 until methods.length()) {
+                        val method = methods.optString(m)
+                        if (method == "generateContent") supportsGenerateContent = true
+                        if (method == "generateAudio") supportsGenerateAudio = true
+                    }
+                    if (!supportsGenerateContent && !supportsGenerateAudio) continue
+
+                    val displayName = obj.optString("displayName")
+                    val description = obj.optString("description")
+                    val outputModalities = obj.optJSONArray("outputModalities")
+                    var supportsAudioModality = false
+                    if (outputModalities != null) {
+                        for (k in 0 until outputModalities.length()) {
+                            if (outputModalities.optString(k).equals("AUDIO", ignoreCase = true)) {
+                                supportsAudioModality = true
+                                break
+                            }
+                        }
+                    }
+
+                    val isStrictTts = cleanId.contains("tts", ignoreCase = true) ||
+                        displayName.contains("tts", ignoreCase = true) ||
+                        description.contains("text-to-speech", ignoreCase = true) ||
+                        description.contains("tts", ignoreCase = true) ||
+                        supportsGenerateAudio ||
+                        supportsAudioModality
+
+                    if (isStrictTts) {
+                        return@withContext Result.success(cleanId)
+                    }
+
+                    val isAudioCapable = cleanId.contains("audio", ignoreCase = true) ||
+                        displayName.contains("audio", ignoreCase = true) ||
+                        description.contains("audio", ignoreCase = true)
+
+                    if (isAudioCapable && audioFallbackCandidate == null) {
+                        audioFallbackCandidate = cleanId
+                    }
+                }
+
+                if (audioFallbackCandidate != null) {
+                    Result.success(audioFallbackCandidate)
+                } else {
+                    Result.failure(
+                        GeminiRestException(404, "No available audio/TTS model found via ListModels.")
+                    )
+                }
+            }
+        } catch (e: UnknownHostException) {
+            Result.failure(GeminiRestException(null, "No internet connection. Please check Wi-Fi or mobile data."))
+        } catch (e: ConnectException) {
+            Result.failure(GeminiRestException(null, "No internet connection. Unable to reach Gemini servers."))
+        } catch (e: SocketTimeoutException) {
+            Result.failure(GeminiRestException(null, "Connection timed out. Check your internet connection and try again."))
+        } catch (e: IOException) {
+            Result.failure(GeminiRestException(null, "Network error: ${e.localizedMessage ?: "No internet connection."}"))
+        } catch (e: Exception) {
+            Result.failure(GeminiRestException(null, e.localizedMessage ?: "Failed to query ListModels."))
+        }
+    }
+
+    private suspend fun synthesizeSpeechSingleKey(
+        apiKey: String,
+        text: String,
+        voiceName: String,
+        modelId: String
+    ): Result<Pair<ByteArray, String>> = withContext(Dispatchers.IO) {
+        try {
+            val bodyJson = JSONObject().apply {
+                put(
+                    "contents",
+                    JSONArray().put(
+                        JSONObject().apply {
+                            put("role", "user")
+                            put("parts", JSONArray().put(JSONObject().apply { put("text", text) }))
+                        }
+                    )
+                )
+                put(
+                    "generationConfig",
+                    JSONObject().apply {
+                        put("responseModalities", JSONArray().put("AUDIO"))
+                        put(
+                            "speechConfig",
+                            JSONObject().apply {
+                                put(
+                                    "voiceConfig",
+                                    JSONObject().apply {
+                                        put(
+                                            "prebuiltVoiceConfig",
+                                            JSONObject().apply { put("voiceName", voiceName) }
+                                        )
+                                    }
+                                )
+                            }
+                        )
+                    }
+                )
+            }
+
+            val url = "$baseUrl/v1beta/models/$modelId:generateContent"
+            val request = Request.Builder()
+                .url(url)
+                .addHeader("x-goog-api-key", apiKey)
+                .addHeader("Content-Type", "application/json")
+                .post(bodyJson.toString().toRequestBody("application/json".toMediaType()))
+                .build()
+
+            httpClient.newCall(request).execute().use { response ->
+                val rawBody = response.body?.string().orEmpty()
+                if (!response.isSuccessful) {
+                    val apiMessage = extractApiErrorMessage(rawBody)
+                    val mapped = mapHttpError(response.code, apiMessage)
+                    return@withContext Result.failure(GeminiRestException(response.code, mapped))
+                }
+                val audioPair = extractAudioInlineData(rawBody)
+                if (audioPair == null || audioPair.first.isEmpty()) {
+                    Result.failure(GeminiRestException(response.code, "Gemini TTS returned empty audio."))
+                } else {
+                    Result.success(audioPair)
+                }
+            }
+        } catch (e: UnknownHostException) {
+            Result.failure(GeminiRestException(null, "No internet connection. Please check Wi-Fi or mobile data."))
+        } catch (e: ConnectException) {
+            Result.failure(GeminiRestException(null, "No internet connection. Unable to reach Gemini servers."))
+        } catch (e: SocketTimeoutException) {
+            Result.failure(GeminiRestException(null, "Connection timed out. Check your internet connection and try again."))
+        } catch (e: IOException) {
+            Result.failure(GeminiRestException(null, "Network error: ${e.localizedMessage ?: "No internet connection."}"))
+        } catch (e: Exception) {
+            Result.failure(GeminiRestException(null, e.localizedMessage ?: "Unexpected Gemini TTS error."))
+        }
+    }
+
+    private fun extractAudioInlineData(rawBody: String): Pair<ByteArray, String>? {
+        val json = JSONObject(rawBody)
+        val candidates = json.optJSONArray("candidates") ?: return null
+        val first = candidates.optJSONObject(0) ?: return null
+        val content = first.optJSONObject("content") ?: return null
+        val parts = content.optJSONArray("parts") ?: return null
+        for (i in 0 until parts.length()) {
+            val part = parts.optJSONObject(i) ?: continue
+            val inline = part.optJSONObject("inlineData") ?: part.optJSONObject("inline_data") ?: continue
+            val b64 = inline.optString("data").trim()
+            if (b64.isBlank()) continue
+            val mimeType = inline.optString("mimeType").ifBlank {
+                inline.optString("mime_type").ifBlank { "audio/L16;codec=pcm;rate=24000" }
+            }
+            val decoded = runCatching { Base64.decode(b64, Base64.DEFAULT) }.getOrNull() ?: continue
+            if (decoded.isNotEmpty()) {
+                return decoded to mimeType
+            }
+        }
+        return null
+    }
+
     private fun extractApiErrorMessage(rawBody: String): String {
         return runCatching {
             JSONObject(rawBody).optJSONObject("error")?.optString("message").orEmpty()
@@ -376,6 +681,7 @@ class GeminiRestClient(
     companion object {
         const val DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com"
         const val DEFAULT_MODEL = GEMINI_DEFAULT_MODEL
+        const val DEFAULT_TTS_MODEL = GEMINI_TTS_DEFAULT_MODEL
 
         fun mapHttpError(code: Int, detail: String = ""): String {
             return when (code) {

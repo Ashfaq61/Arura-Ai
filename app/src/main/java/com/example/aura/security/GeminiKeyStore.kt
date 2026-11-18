@@ -6,6 +6,8 @@ import android.security.keystore.KeyProperties
 import android.util.Base64
 import android.util.Log
 import com.example.aura.ai.GEMINI_DEFAULT_MODEL
+import com.example.aura.ai.GEMINI_TTS_DEFAULT_MODEL
+import com.example.aura.ai.VoiceEngineMode
 import org.json.JSONArray
 import org.json.JSONObject
 import java.security.KeyStore
@@ -47,6 +49,41 @@ class GeminiKeyStore(context: Context) {
     fun saveSelectedModel(modelId: String): String {
         val cleaned = modelId.trim().removePrefix("models/").ifBlank { GEMINI_DEFAULT_MODEL }
         prefs.edit().putString(SELECTED_MODEL_KEY, cleaned).apply()
+        return cleaned
+    }
+
+    fun getVoiceEngineMode(): VoiceEngineMode {
+        return VoiceEngineMode.fromId(prefs.getString(VOICE_ENGINE_MODE_KEY, null))
+    }
+
+    fun saveVoiceEngineMode(mode: VoiceEngineMode): VoiceEngineMode {
+        prefs.edit().putString(VOICE_ENGINE_MODE_KEY, mode.id).apply()
+        return mode
+    }
+
+    fun getSelectedVoice(): String {
+        return prefs.getString(SELECTED_VOICE_KEY, null)
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
+            ?: DEFAULT_VOICE_NAME
+    }
+
+    fun saveSelectedVoice(voiceName: String): String {
+        val cleaned = voiceName.trim().ifBlank { DEFAULT_VOICE_NAME }
+        prefs.edit().putString(SELECTED_VOICE_KEY, cleaned).apply()
+        return cleaned
+    }
+
+    fun getSelectedTtsModel(): String {
+        return prefs.getString(SELECTED_TTS_MODEL_KEY, null)
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
+            ?: GEMINI_TTS_DEFAULT_MODEL
+    }
+
+    fun saveSelectedTtsModel(modelId: String): String {
+        val cleaned = modelId.trim().removePrefix("models/").ifBlank { GEMINI_TTS_DEFAULT_MODEL }
+        prefs.edit().putString(SELECTED_TTS_MODEL_KEY, cleaned).apply()
         return cleaned
     }
 
@@ -223,6 +260,10 @@ class GeminiKeyStore(context: Context) {
         private const val META_KEY = "gemini_keys_meta"
         private const val SECRET_PREFIX = "gemini_secret_"
         private const val SELECTED_MODEL_KEY = "gemini_selected_model"
+        private const val VOICE_ENGINE_MODE_KEY = "gemini_voice_engine_mode"
+        private const val SELECTED_VOICE_KEY = "gemini_selected_voice"
+        private const val SELECTED_TTS_MODEL_KEY = "gemini_selected_tts_model"
+        private const val DEFAULT_VOICE_NAME = "Kore"
         private const val ANDROID_KEYSTORE = "AndroidKeyStore"
         private const val TRANSFORMATION = "AES/GCM/NoPadding"
     }

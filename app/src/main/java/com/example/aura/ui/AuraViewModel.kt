@@ -20,6 +20,7 @@ import com.example.aura.ai.ModelRoutingEngine
 import com.example.aura.ai.MultiProviderRouter
 import com.example.aura.ai.MultilingualDetector
 import com.example.aura.ai.TaskDispatcher
+import com.example.aura.ai.VoiceEngineMode
 import com.example.aura.automation.AccessibilityBridge
 import com.example.aura.automation.AutomationCommand
 import com.example.aura.automation.DeviceControlEngine
@@ -106,7 +107,11 @@ class AuraViewModel(application: Application) : AndroidViewModel(application) {
     )
     val callMessaging = PhoneCallAndMessagingManager(application)
     val fileManager = FileDocumentManager(application)
-    val voiceEngine = VoiceEngine(application)
+    val voiceEngine = VoiceEngine(
+        context = application,
+        geminiKeyStore = geminiKeyStore,
+        geminiRestClient = geminiRestClient
+    )
     val taskDispatcher = TaskDispatcher(
         aiRouter = aiRouter,
         modelRouter = modelRouter,
@@ -157,6 +162,7 @@ class AuraViewModel(application: Application) : AndroidViewModel(application) {
     val partialTranscript = voiceEngine.partialTranscript
     val voiceLogs = voiceEngine.voiceLogs
     val continuousVoice = voiceEngine.continuousConversation
+    val activeVoiceIndicator = voiceEngine.activeVoiceIndicator
 
     val accessibilityConnected = AccessibilityBridge.isServiceConnected
     val screenSnapshot = AccessibilityBridge.latestSnapshot
@@ -203,6 +209,12 @@ class AuraViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _selectedGeminiModel = MutableStateFlow(geminiKeyStore.getSelectedModel())
     val selectedGeminiModel: StateFlow<String> = _selectedGeminiModel.asStateFlow()
+
+    private val _voiceEngineMode = MutableStateFlow(geminiKeyStore.getVoiceEngineMode())
+    val voiceEngineMode: StateFlow<VoiceEngineMode> = _voiceEngineMode.asStateFlow()
+
+    private val _selectedVoiceName = MutableStateFlow(geminiKeyStore.getSelectedVoice())
+    val selectedVoiceName: StateFlow<String> = _selectedVoiceName.asStateFlow()
 
     val activeModelInUse: StateFlow<String> = combine(
         preferences,
@@ -265,6 +277,19 @@ class AuraViewModel(application: Application) : AndroidViewModel(application) {
                 }
             } else {
                 aiRouter.syncActiveModel(currentPrefs.activeModelId)
+            }
+            val savedVoice = geminiKeyStore.getSelectedVoice()
+            _selectedVoiceName.value = savedVoice
+            _voiceEngineMode.value = geminiKeyStore.getVoiceEngineMode()
+            voiceEngine.refreshConfiguredVoiceIndicator()
+            if (currentPrefs.activeVoiceName != savedVoice) {
+                preferencesRepository.setActiveVoice(savedVoice)
+            }
+        }
+        viewModelScope.launch {
+            voiceEngine.ttsStatusNotice.filterNotNull().collect { notice ->
+                _statusBanner.value = notice
+                voiceEngine.clearTtsStatusNotice()
             }
         }
         viewModelScope.launch {
@@ -330,7 +355,7 @@ class AuraViewModel(application: Application) : AndroidViewModel(application) {
                     attachedBitmap = attachedBitmap,
                     onSpeakReply = { reply, lang ->
                         if (speakReply) {
-                            voiceEngine.speak(reply, preferences.value.activeVoiceName, lang)
+                            voiceEngine.speak(reply, _selectedVoiceName.value, lang)
                         } else {
                             voiceEngine.setOrbState(VoiceOrbState.IDLE)
                         }
@@ -927,8 +952,18 @@ class AuraViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch { preferencesRepository.setActiveProviderAndModel(providerId, resolved) }
     }
 
+    fun setVoiceEngineMode(mode: VoiceEngineMode) {
+        val saved = geminiKeyStore.saveVoiceEngineMode(mode)
+        _voiceEngineMode.value = saved
+        voiceEngine.refreshConfiguredVoiceIndicator()
+        _statusBanner.value = "Voice engine: ${saved.label}"
+    }
+
     fun setVoicePreset(name: String) {
-        viewModelScope.launch { preferencesRepository.setActiveVoice(name) }
+        val saved = geminiKeyStore.saveSelectedVoice(name)
+        _selectedVoiceName.value = saved
+        voiceEngine.refreshConfiguredVoiceIndicator()
+        viewModelScope.launch { preferencesRepository.setActiveVoice(saved) }
     }
 
     fun setLanguagePreference(lang: String) {

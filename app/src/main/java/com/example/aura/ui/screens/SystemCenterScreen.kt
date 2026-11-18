@@ -70,6 +70,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.aura.ai.AiProviderType
 import com.example.aura.ai.AuraVoiceCatalog
 import com.example.aura.ai.GEMINI_DEFAULT_MODEL
+import com.example.aura.ai.VoiceEngineMode
 import com.example.aura.security.ActionSafetyLevel
 import com.example.aura.security.GeminiKeyStore
 import com.example.aura.ui.AuraViewModel
@@ -439,10 +440,13 @@ private fun ApiAndVoiceSettingsTab(viewModel: AuraViewModel) {
     val geminiTestStatus by viewModel.geminiKeyTestStatus.collectAsStateWithLifecycle()
     val isTestingGeminiKey by viewModel.isTestingGeminiKey.collectAsStateWithLifecycle()
     val selectedGeminiModel by viewModel.selectedGeminiModel.collectAsStateWithLifecycle()
+    val voiceEngineMode by viewModel.voiceEngineMode.collectAsStateWithLifecycle()
+    val selectedVoiceName by viewModel.selectedVoiceName.collectAsStateWithLifecycle()
 
     var geminiKeyInput by remember { mutableStateOf("") }
     var showGeminiKey by remember { mutableStateOf(false) }
     var modelDropdownExpanded by remember { mutableStateOf(false) }
+    var voiceDropdownExpanded by remember { mutableStateOf(false) }
     var customModelInput by remember(selectedGeminiModel) { mutableStateOf(selectedGeminiModel) }
 
     var selectedSlotProvider by remember { mutableStateOf(AiProviderType.GROQ) }
@@ -771,7 +775,7 @@ private fun ApiAndVoiceSettingsTab(viewModel: AuraViewModel) {
             PrivacyAndRoutingCard(viewModel)
         }
 
-        // Voice Selection (Kore, Aoede, Zephyr, Leda, Callirrhoe, Autonoe)
+        // Voice Engine & Gemini Voice Dropdown (Kore, Puck, Charon, Aoede, Fenrir)
         item {
             Card(
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -779,19 +783,61 @@ private fun ApiAndVoiceSettingsTab(viewModel: AuraViewModel) {
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Column(modifier = Modifier.padding(14.dp)) {
-                    Text("Voice Assistant Presets", style = MaterialTheme.typography.titleMedium)
+                    Text("Voice engine", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                     Spacer(modifier = Modifier.height(6.dp))
-                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        AuraVoiceCatalog.presets.forEach { preset ->
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        VoiceEngineMode.entries.forEach { mode ->
                             FilterChip(
-                                selected = prefs.activeVoiceName == preset.name,
-                                onClick = { viewModel.setVoicePreset(preset.name) },
-                                label = { Text("${preset.name} (${preset.genderStyle})") }
+                                selected = voiceEngineMode == mode,
+                                onClick = { viewModel.setVoiceEngineMode(mode) },
+                                label = { Text(mode.label) },
+                                modifier = Modifier.testTag("voice_engine_${mode.id.lowercase()}")
                             )
                         }
                     }
-                    val chosen = AuraVoiceCatalog.findPreset(prefs.activeVoiceName)
-                    Text("Active: ${chosen.name} — ${chosen.tone} (Pitch ${chosen.ttsPitch}, Rate ${chosen.ttsRate})", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+
+                    Spacer(modifier = Modifier.height(10.dp))
+                    ExposedDropdownMenuBox(
+                        expanded = voiceDropdownExpanded,
+                        onExpandedChange = { voiceDropdownExpanded = !voiceDropdownExpanded },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        OutlinedTextField(
+                            value = selectedVoiceName,
+                            onValueChange = {},
+                            readOnly = true,
+                            label = { Text("Voice") },
+                            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = voiceDropdownExpanded) },
+                            colors = ExposedDropdownMenuDefaults.outlinedTextFieldColors(),
+                            modifier = Modifier
+                                .menuAnchor(MenuAnchorType.PrimaryNotEditable, enabled = true)
+                                .fillMaxWidth()
+                                .testTag("voice_dropdown")
+                        )
+                        ExposedDropdownMenu(
+                            expanded = voiceDropdownExpanded,
+                            onDismissRequest = { voiceDropdownExpanded = false }
+                        ) {
+                            AuraVoiceCatalog.geminiDropdownVoices.forEach { voiceOption ->
+                                DropdownMenuItem(
+                                    text = { Text(voiceOption) },
+                                    onClick = {
+                                        viewModel.setVoicePreset(voiceOption)
+                                        voiceDropdownExpanded = false
+                                    }
+                                )
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(6.dp))
+                    val chosen = AuraVoiceCatalog.findPreset(selectedVoiceName)
+                    val engineNote = if (voiceEngineMode == VoiceEngineMode.GEMINI) {
+                        "Active: Gemini (${chosen.name} — ${chosen.tone}) • Fallback: Google/Device TTS (rate 1.0, pitch 1.0)"
+                    } else {
+                        "Active: Device voice only (Google/Device TTS • rate 1.0, pitch 1.0)"
+                    }
+                    Text(engineNote, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
                 }
             }
         }

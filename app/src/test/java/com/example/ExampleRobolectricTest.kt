@@ -609,4 +609,219 @@ class ExampleRobolectricTest {
         assertTrue(res.isFailure)
         assertTrue(res.exceptionOrNull()?.message.orEmpty().contains("API key add karo"))
     }
+
+    @Test
+    fun `gemini key store persists voice engine mode voice selection and tts model`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val store = com.example.aura.security.GeminiKeyStore(context)
+        store.clearAll()
+
+        assertEquals(com.example.aura.ai.VoiceEngineMode.GEMINI, store.getVoiceEngineMode())
+        assertEquals("Kore", store.getSelectedVoice())
+        assertEquals(com.example.aura.ai.GEMINI_TTS_DEFAULT_MODEL, store.getSelectedTtsModel())
+
+        store.saveVoiceEngineMode(com.example.aura.ai.VoiceEngineMode.DEVICE_ONLY)
+        store.saveSelectedVoice("Fenrir")
+        store.saveSelectedTtsModel("gemini-audio-tts-v2")
+
+        assertEquals(com.example.aura.ai.VoiceEngineMode.DEVICE_ONLY, store.getVoiceEngineMode())
+        assertEquals("Fenrir", store.getSelectedVoice())
+        assertEquals("gemini-audio-tts-v2", store.getSelectedTtsModel())
+        assertEquals(listOf("Kore", "Puck", "Charon", "Aoede", "Fenrir"), com.example.aura.ai.AuraVoiceCatalog.geminiDropdownVoices)
+    }
+
+    @Test
+    fun `tts text chunker splits long replies into sentences capped at 200 characters`() {
+        val longClause = "This is a deliberately verbose clause without terminal punctuation " +
+            "designed to verify that even single oversized sentences are broken down cleanly along clause or word boundaries so no single TTS API request exceeds two hundred characters"
+        val reply = "Hello! How can I assist you today? $longClause. Everything is ready."
+        val chunks = com.example.aura.voice.TtsTextChunker.splitIntoSentences(reply, 200)
+
+        assertTrue(chunks.size >= 4)
+        assertEquals("Hello!", chunks.first())
+        assertEquals("Everything is ready.", chunks.last())
+        assertTrue(chunks.all { it.length <= 200 })
+    }
+
+    @Test
+    fun `gemini rest client tts retries HTTP 429 on next saved key and auto switches 404 via ListModels`() = runTest {
+        val fakeAudioBytes = ByteArray(64) { (it % 127).toByte() }
+        val fakeAudioB64 = android.util.Base64.encodeToString(fakeAudioBytes, android.util.Base64.NO_WRAP)
+        val seenRequests = mutableListOf<String>()
+
+        val mockHttp = okhttp3.OkHttpClient.Builder()
+            .addInterceptor { chain ->
+                val req = chain.request()
+                val url = req.url.toString()
+                val key = req.header("x-goog-api-key").orEmpty()
+                seenRequests.add("${req.method} $url key=$key")
+
+                val (code, body) = when {
+                    url.contains("/v1beta/models?") -> 200 to """
+                        {
+                          "models": [
+                            {"name": "models/gemini-3.8-flash", "supportedGenerationMethods": ["generateContent"]},
+                            {"name": "models/gemini-audio-tts-live", "supportedGenerationMethods": ["generateContent"], "outputModalities": ["AUDIO"]}
+                          ]
+                        }
+                    """.trimIndent()
+                    url.contains("deprecated-tts:generateContent") ->
+                        404 to """{"error":{"message":"TTS model not found"}}"""
+                    key == "tts_key_429" ->
+                        429 to """{"error":{"message":"Rate limit exceeded"}}"""
+                    else ->
+                        200 to """{"candidates":[{"content":{"parts":[{"inlineData":{"mimeType":"audio/L16;codec=pcm;rate=24000","data":"$fakeAudioB64"}}]}}]}"""
+                }
+
+                okhttp3.Response.Builder()
+                    .request(req)
+                    .protocol(okhttp3.Protocol.HTTP_1_1)
+                    .code(code)
+                    .message(if (code == 200) "OK" else "Error")
+                    .body(body.toResponseBody("application/json".toMediaType()))
+                    .build()
+            }
+            .build()
+
+        val client = com.example.aura.ai.GeminiRestClient(httpClient = mockHttp)
+
+        // 1. HTTP 429 on Key #1 retries Key #2 and succeeds
+        val failoverRes = client.synthesizeSpeechWithFailover(
+            keys = listOf("tts_key_429", "tts_key_ok"),
+            text = "Hello!",
+            voiceName = "Kore"
+        )
+        assertTrue(failoverRes.isSuccess)
+        assertEquals(1, failoverRes.getOrThrow().keyIndexUsed)
+        assertTrue(failoverRes.getOrThrow().failoverNotes.any { it.contains("429") })
+
+        // 2. HTTP 404 queries ListModels, saves audio/TTS model, and retries once
+        var fallbackSaved: String? = null
+        val model404Res = client.synthesizeSpeechWithFailover(
+            keys = listOf("tts_key_ok"),
+            text = "Testing fallback",
+            voiceName = "Puck",
+            modelId = "deprecated-tts",
+            onModelFallback = { fallbackSaved = it }
+        )
+        assertTrue(model404Res.isSuccess)
+        assertEquals("gemini-audio-tts-live", fallbackSaved)
+        assertEquals("gemini-audio-tts-live", model404Res.getOrThrow().modelUsed)
+        assertTrue(seenRequests.any { it.contains("/v1beta/models?key=tts_key_ok") })
+    }
+
+    @Test
+    fun `voice engine caches repeated phrases isolates failed chunks to device fallback and updates indicator`() = runTest {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val cacheFolder = java.io.File(context.cacheDir, com.example.aura.voice.GeminiTtsAudioCache.CACHE_FOLDER_NAME)
+        cacheFolder.deleteRecursively()
+
+        val keyStore = com.example.aura.security.GeminiKeyStore(context).apply {
+            clearAll()
+            saveVoiceEngineMode(com.example.aura.ai.VoiceEngineMode.GEMINI)
+            saveSelectedVoice("Kore")
+            saveSelectedTtsModel(com.example.aura.ai.GEMINI_TTS_DEFAULT_MODEL)
+            saveKey("AIzaTtsKeyOne11111111111111")
+        }
+
+        val fakeAudioBytes = ByteArray(100) { (it % 100).toByte() }
+        val fakeAudioB64 = android.util.Base64.encodeToString(fakeAudioBytes, android.util.Base64.NO_WRAP)
+        var apiCalls = 0
+        val mockHttp = okhttp3.OkHttpClient.Builder()
+            .addInterceptor { chain ->
+                apiCalls++
+                val req = chain.request()
+                val reqBody = okio.Buffer().also { req.body?.writeTo(it) }.readUtf8()
+                val shouldFail = reqBody.contains("Second fails")
+                val (code, json) = if (shouldFail) {
+                    503 to """{"error":{"message":"Temporary failure"}}"""
+                } else {
+                    200 to """{"candidates":[{"content":{"parts":[{"inlineData":{"mimeType":"audio/L16;codec=pcm;rate=24000","data":"$fakeAudioB64"}}]}}]}"""
+                }
+                okhttp3.Response.Builder()
+                    .request(req)
+                    .protocol(okhttp3.Protocol.HTTP_1_1)
+                    .code(code)
+                    .message(if (code == 200) "OK" else "Error")
+                    .body(json.toResponseBody("application/json".toMediaType()))
+                    .build()
+            }
+            .build()
+
+        val geminiPlayedFiles = mutableListOf<java.io.File>()
+        val deviceSpokenChunks = mutableListOf<String>()
+        val observedIndicators = mutableListOf<String>()
+
+        lateinit var engine: com.example.aura.voice.VoiceEngine
+        val playerBridge = object : com.example.aura.voice.VoiceAudioPlaybackBridge {
+            override suspend fun playFile(file: java.io.File): Boolean {
+                geminiPlayedFiles.add(file)
+                observedIndicators.add(engine.activeVoiceIndicator.value)
+                return true
+            }
+            override fun stop() {}
+        }
+        val deviceBridge = object : com.example.aura.voice.DeviceTtsPlaybackBridge {
+            override suspend fun speakChunk(text: String, language: AuraLanguage, utteranceId: String): Boolean {
+                deviceSpokenChunks.add(text)
+                observedIndicators.add(engine.activeVoiceIndicator.value)
+                return true
+            }
+            override fun stop() {}
+            override fun release() {}
+        }
+
+        engine = com.example.aura.voice.VoiceEngine(
+            context = context,
+            geminiKeyStore = keyStore,
+            geminiRestClient = com.example.aura.ai.GeminiRestClient(httpClient = mockHttp),
+            audioPlayerOverride = playerBridge,
+            deviceTtsOverride = deviceBridge
+        )
+
+        // Chunk 1 succeeds -> Chunk 2 fails (device fallback only for chunk 2) -> Chunk 3 succeeds
+        engine.speakQueuedAndAwait("Hello friend! Second fails here. Third succeeds cleanly.", "Kore", AuraLanguage.ENGLISH)
+
+        assertEquals(3, apiCalls)
+        assertEquals(2, geminiPlayedFiles.size)
+        assertEquals(listOf("Second fails here."), deviceSpokenChunks)
+        assertEquals(
+            listOf("Voice: Gemini (Kore)", "Voice: Fallback (device)", "Voice: Gemini (Kore)"),
+            observedIndicators
+        )
+
+        // Repeating common greeting uses cache folder with zero extra API calls
+        val callsBeforeRepeat = apiCalls
+        engine.speakQueuedAndAwait("Hello friend!", "Kore", AuraLanguage.ENGLISH)
+        assertEquals(callsBeforeRepeat, apiCalls)
+        assertEquals(3, geminiPlayedFiles.size)
+
+        // Device voice only mode skips Gemini API completely
+        keyStore.saveVoiceEngineMode(com.example.aura.ai.VoiceEngineMode.DEVICE_ONLY)
+        engine.refreshConfiguredVoiceIndicator()
+        assertEquals("Voice: Fallback (device)", engine.activeVoiceIndicator.value)
+        engine.speakQueuedAndAwait("Hello friend!", "Kore", AuraLanguage.ENGLISH)
+        assertEquals(callsBeforeRepeat, apiCalls)
+        assertTrue(deviceSpokenChunks.contains("Hello friend!"))
+
+        engine.release()
+        keyStore.clearAll()
+        cacheFolder.deleteRecursively()
+    }
+
+    @Test
+    fun `voice engine detects google tts engine when installed and uses rate 1_0 and pitch 1_0 constants`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val shadowPm = org.robolectric.Shadows.shadowOf(context.packageManager)
+        val pkgInfo = android.content.pm.PackageInfo().apply {
+            packageName = com.example.aura.voice.VoiceEngine.GOOGLE_TTS_PACKAGE
+        }
+        shadowPm.installPackage(pkgInfo)
+
+        val engine = com.example.aura.voice.VoiceEngine(context)
+        assertEquals(com.example.aura.voice.VoiceEngine.GOOGLE_TTS_PACKAGE, engine.selectedDeviceTtsEnginePackage)
+        assertEquals(1.0f, com.example.aura.voice.VoiceEngine.DEVICE_FALLBACK_RATE, 0.001f)
+        assertEquals(1.0f, com.example.aura.voice.VoiceEngine.DEVICE_FALLBACK_PITCH, 0.001f)
+        engine.release()
+    }
 }

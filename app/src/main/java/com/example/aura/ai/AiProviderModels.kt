@@ -58,6 +58,16 @@ enum class AiProviderType(
     )
 }
 
+enum class VoiceEngineMode(val id: String, val label: String) {
+    GEMINI("GEMINI", "Gemini voice (default)"),
+    DEVICE_ONLY("DEVICE_ONLY", "Device voice only");
+
+    companion object {
+        fun fromId(id: String?): VoiceEngineMode =
+            entries.firstOrNull { it.id == id } ?: GEMINI
+    }
+}
+
 data class AuraVoicePreset(
     val name: String,
     val genderStyle: String,
@@ -68,13 +78,18 @@ data class AuraVoicePreset(
 )
 
 object AuraVoiceCatalog {
+    val geminiDropdownVoices: List<String> = listOf("Kore", "Puck", "Charon", "Aoede", "Fenrir")
+
     val presets = listOf(
-        AuraVoicePreset("Kore", "Female", "Clear & balanced", 1.05f, 1.0f),
-        AuraVoicePreset("Aoede", "Female", "Warm & conversational", 1.10f, 0.98f),
-        AuraVoicePreset("Zephyr", "Neutral / Bright", "Crisp & energetic", 1.0f, 1.06f),
-        AuraVoicePreset("Leda", "Female", "Calm & authoritative", 0.96f, 0.95f),
-        AuraVoicePreset("Callirrhoe", "Female", "Expressive & natural", 1.08f, 1.02f),
-        AuraVoicePreset("Autonoe", "Male / Deep", "Grounded & analytical", 0.85f, 0.97f)
+        AuraVoicePreset("Kore", "Female", "Clear & balanced", 1.0f, 1.0f),
+        AuraVoicePreset("Puck", "Male / Upbeat", "Bright & playful", 1.0f, 1.0f),
+        AuraVoicePreset("Charon", "Male / Deep", "Informative & steady", 1.0f, 1.0f),
+        AuraVoicePreset("Aoede", "Female", "Warm & conversational", 1.0f, 1.0f),
+        AuraVoicePreset("Fenrir", "Male / Expressive", "Dynamic & bold", 1.0f, 1.0f),
+        AuraVoicePreset("Zephyr", "Neutral / Bright", "Crisp & energetic", 1.0f, 1.0f),
+        AuraVoicePreset("Leda", "Female", "Calm & authoritative", 1.0f, 1.0f),
+        AuraVoicePreset("Callirrhoe", "Female", "Expressive & natural", 1.0f, 1.0f),
+        AuraVoicePreset("Autonoe", "Male / Deep", "Grounded & analytical", 1.0f, 1.0f)
     )
 
     fun findPreset(name: String): AuraVoicePreset =
