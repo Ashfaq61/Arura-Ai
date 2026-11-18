@@ -1,0 +1,8 @@
+<resources>
+    <string name="app_name">AURA AI</string>
+    <string name="accessibility_service_label">AURA AI Screen &amp; Automation</string>
+    <string name="accessibility_service_description">Enables AURA AI to read visible on-screen elements and perform user-approved taps, scrolls, swipes, and text input. You can revoke or pause this anytime via Emergency Stop.</string>
+    <string name="notification_listener_label">AURA AI Notification Reader</string>
+    <string name="aura_tagline">Autonomous Multi-Agent Android Intelligence</string>
+    <string name="emergency_stop">STOP</string>
+</resources>

@@ -1,0 +1,6 @@
+{
+  "name": "AURA AI",
+  "description": "Autonomous, modular Android AI assistant with multi-agent orchestration, voice/Gemini Live, screen vision & accessibility automation, tool marketplace, and multi-provider routing.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
