@@ -25,10 +25,22 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
+      - name: Detect project directory
+        run: |
+          SETTINGS_FILE=$(find . -maxdepth 3 \( -name "settings.gradle.kts" -o -name "settings.gradle" \) | head -n 1)
+          if [ -z "$SETTINGS_FILE" ]; then
+            echo "ERROR: Could not find settings.gradle or settings.gradle.kts within 3 levels."
+            exit 1
+          fi
+          PROJECT_DIR=$(dirname "$SETTINGS_FILE")
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "Detected PROJECT_DIR=$PROJECT_DIR"
+
       - name: Accept Android SDK licenses
         run: yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
 
       - name: Prepare debug keystore
+        working-directory: ${{ env.PROJECT_DIR }}
         run: |
           if [ ! -f ~/.android/debug.keystore ]; then
             mkdir -p ~/.android
@@ -46,21 +58,33 @@ jobs:
             cp ~/.android/debug.keystore debug.keystore
           fi
 
+      - name: Generate Gradle wrapper
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          if [ ! -f gradlew ]; then
+            gradle wrapper --gradle-version 8.10.2
+          fi
+
       - name: Grant Gradle execute permission
+        working-directory: ${{ env.PROJECT_DIR }}
         run: chmod +x gradlew
 
       - name: Run Unit & Robolectric Tests
+        working-directory: ${{ env.PROJECT_DIR }}
         continue-on-error: true
         run: ./gradlew testDebugUnitTest --stacktrace
 
       - name: Run Android Lint
+        working-directory: ${{ env.PROJECT_DIR }}
         continue-on-error: true
         run: ./gradlew lintDebug --stacktrace
 
       - name: Build Debug APK
+        working-directory: ${{ env.PROJECT_DIR }}
         run: ./gradlew assembleDebug --stacktrace
 
       - name: Build Release APK
+        working-directory: ${{ env.PROJECT_DIR }}
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
@@ -79,7 +103,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: debug-apk
-          path: app/build/outputs/apk/debug/*.apk
+          path: ${{ env.PROJECT_DIR }}/**/build/outputs/apk/debug/*.apk
           if-no-files-found: error
 
       - name: Upload Test Reports
@@ -88,5 +112,5 @@ jobs:
         with:
           name: test-reports
           path: |
-            app/build/reports
-            app/build/test-results
+            ${{ env.PROJECT_DIR }}/**/build/reports
+            ${{ env.PROJECT_DIR }}/**/build/test-results
