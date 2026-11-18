@@ -15,6 +15,7 @@ import com.example.aura.ai.LocalModelCandidate
 import com.example.aura.ai.ModelRoutingEngine
 import com.example.aura.ai.MultiProviderRouter
 import com.example.aura.ai.MultilingualDetector
+import com.example.aura.ai.TaskDispatcher
 import com.example.aura.automation.AccessibilityBridge
 import com.example.aura.automation.AutomationCommand
 import com.example.aura.automation.DeviceControlEngine
@@ -88,10 +89,34 @@ class AuraViewModel(application: Application) : AndroidViewModel(application) {
     val callMessaging = PhoneCallAndMessagingManager(application)
     val fileManager = FileDocumentManager(application)
     val voiceEngine = VoiceEngine(application)
+    val taskDispatcher = TaskDispatcher(
+        aiRouter = aiRouter,
+        modelRouter = modelRouter,
+        agentNetwork = agentNetwork,
+        permissionGuard = permissionGuard,
+        memoryRepository = memoryRepository,
+        deviceControl = deviceControl,
+        researchClient = researchClient,
+        toolFactory = toolFactory,
+        callMessaging = callMessaging,
+        privacyRouter = privacyRouter,
+        injectionDefender = injectionDefender,
+        selfHealing = selfHealing
+    )
     val orchestrator = AuraOrchestrator(
-        aiRouter, agentNetwork, permissionGuard, memoryRepository,
-        deviceControl, researchClient, toolFactory, callMessaging,
-        privacyRouter, injectionDefender, selfHealing
+        aiRouter = aiRouter,
+        agentNetwork = agentNetwork,
+        permissionGuard = permissionGuard,
+        memoryRepository = memoryRepository,
+        deviceControl = deviceControl,
+        researchClient = researchClient,
+        toolFactory = toolFactory,
+        callMessaging = callMessaging,
+        privacyRouter = privacyRouter,
+        injectionDefender = injectionDefender,
+        selfHealing = selfHealing,
+        modelRouter = modelRouter,
+        taskDispatcher = taskDispatcher
     )
 
     val preferences: StateFlow<AuraPreferences> = preferencesRepository.preferences
@@ -99,6 +124,7 @@ class AuraViewModel(application: Application) : AndroidViewModel(application) {
 
     val chatMessages: StateFlow<List<ChatTurn>> = orchestrator.chatMessages
     val currentLoopPhase: StateFlow<String> = orchestrator.currentLoopPhase
+    val lastDispatchPlan = taskDispatcher.lastDispatchPlan
 
     val agents = agentNetwork.agents
     val a2aFeed = agentNetwork.a2aFeed

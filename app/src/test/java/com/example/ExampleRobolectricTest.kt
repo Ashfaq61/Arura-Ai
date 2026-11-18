@@ -347,4 +347,88 @@ class ExampleRobolectricTest {
         val resolved = context.packageManager.queryIntentServices(resolveIntent, 0)
         assertTrue(resolved.any { it.serviceInfo.name == AuraAccessibilityService::class.java.name })
     }
+
+    @Test
+    fun `task dispatcher evaluates intent and routes to internal modules and providers`() = runTest {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val db = AuraDatabase.getInstance(context)
+        val repo = MemoryRepository(db)
+        val vault = AuraKeystoreVault(context)
+        val guard = PermissionGuard()
+        val modelRouter = ModelRoutingEngine()
+        val aiRouter = MultiProviderRouter(vault, repo, PrivacyDataRouter(), modelRouter)
+        val deviceControl = DeviceControlEngine(context)
+        val agents = AgentNetworkManager()
+        val research = com.example.aura.research.GitHubAndHfResearchClient()
+        val toolFactory = com.example.aura.evolution.ToolFactoryAndEvolutionEngine(
+            aiRouter, research, repo, agents, guard, deviceControl
+        )
+        val calls = com.example.aura.calls.PhoneCallAndMessagingManager(context)
+
+        val dispatcher = com.example.aura.ai.TaskDispatcher(
+            aiRouter = aiRouter,
+            modelRouter = modelRouter,
+            agentNetwork = agents,
+            permissionGuard = guard,
+            memoryRepository = repo,
+            deviceControl = deviceControl,
+            researchClient = research,
+            toolFactory = toolFactory,
+            callMessaging = calls
+        )
+
+        // 1. Screen Vision inspection
+        val readScreenPlan = dispatcher.evaluateIntent(com.example.aura.ai.IncomingTaskRequest("Read screen"))
+        assertEquals(com.example.aura.ai.TaskIntentCategory.SCREEN_VISION, readScreenPlan.intentCategory)
+        assertTrue(readScreenPlan.target is com.example.aura.ai.DispatchTarget.InternalModule)
+        assertEquals(
+            com.example.aura.ai.DispatchModuleIds.SCREEN_VISION,
+            (readScreenPlan.target as com.example.aura.ai.DispatchTarget.InternalModule).moduleId
+        )
+
+        // 2. Multimodal attached bitmap -> Hybrid Screen Vision + Vision Provider
+        val bmp = android.graphics.Bitmap.createBitmap(16, 16, android.graphics.Bitmap.Config.ARGB_8888)
+        val visionPlan = dispatcher.evaluateIntent(
+            com.example.aura.ai.IncomingTaskRequest("What error is shown here?", attachedBitmap = bmp)
+        )
+        assertEquals(com.example.aura.ai.TaskIntentCategory.SCREEN_VISION, visionPlan.intentCategory)
+        assertTrue(visionPlan.target is com.example.aura.ai.DispatchTarget.HybridVisionProvider)
+        assertEquals("Screen Vision Agent", (visionPlan.target as com.example.aura.ai.DispatchTarget.HybridVisionProvider).agentName)
+
+        // 3. Device Management routing & dispatch
+        val healthPlan = dispatcher.evaluateIntent(com.example.aura.ai.IncomingTaskRequest("Check device health and battery status"))
+        assertEquals(com.example.aura.ai.TaskIntentCategory.DEVICE_MANAGEMENT, healthPlan.intentCategory)
+        assertEquals("device_health", healthPlan.safetyActionType)
+        val healthResult = dispatcher.dispatch(com.example.aura.ai.IncomingTaskRequest("Check device health"), healthPlan)
+        assertTrue(healthResult.success)
+        assertTrue(healthResult.responseText.contains("Device Health"))
+
+        // 4. Accessibility Automation routing
+        val tapPlan = dispatcher.evaluateIntent(com.example.aura.ai.IncomingTaskRequest("tap Submit"))
+        assertEquals(com.example.aura.ai.TaskIntentCategory.ACCESSIBILITY_AUTOMATION, tapPlan.intentCategory)
+        assertEquals("accessibility_tap_target", tapPlan.safetyActionType)
+        assertEquals("Submit", tapPlan.actionParameter)
+
+        // 5. Level 3 Communication gate via TaskDispatcher.dispatch
+        val callPlan = dispatcher.evaluateIntent(com.example.aura.ai.IncomingTaskRequest("call +15551234567"))
+        assertEquals(com.example.aura.ai.TaskIntentCategory.COMMUNICATION, callPlan.intentCategory)
+        val callRes = dispatcher.dispatch(com.example.aura.ai.IncomingTaskRequest("call +15551234567"), callPlan)
+        assertFalse(callRes.success)
+        assertTrue(callRes.guardDecision is GuardDecision.RequiresApproval)
+        assertNotNull(callRes.pendingApprovalId)
+
+        // 6. AI Provider routing respects LOCAL_ONLY policy
+        val localChatPlan = dispatcher.evaluateIntent(
+            com.example.aura.ai.IncomingTaskRequest(
+                rawInstruction = "Explain clean architecture in Kotlin",
+                prefs = com.example.aura.memory.AuraPreferences(intelligenceMode = "LOCAL_ONLY")
+            )
+        )
+        assertEquals(com.example.aura.ai.TaskIntentCategory.CONVERSATIONAL_AI, localChatPlan.intentCategory)
+        assertTrue(localChatPlan.target is com.example.aura.ai.DispatchTarget.AiProvider)
+        assertEquals(
+            AiProviderType.LOCAL_OFFLINE.id,
+            (localChatPlan.target as com.example.aura.ai.DispatchTarget.AiProvider).routingDecision.providerId
+        )
+    }
 }
