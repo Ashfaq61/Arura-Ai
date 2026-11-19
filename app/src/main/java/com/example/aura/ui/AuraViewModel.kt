@@ -380,9 +380,28 @@ class AuraViewModel(application: Application) : AndroidViewModel(application) {
         onBanner = { msg -> _statusBanner.value = msg }
     )
 
+    val globalNetworkController: GlobalNetworkController = GlobalNetworkController(
+        app = application,
+        scope = viewModelScope,
+        db = db,
+        memoryRepository = memoryRepository,
+        preferencesRepository = preferencesRepository,
+        vault = vault,
+        geminiKeyStore = geminiKeyStore,
+        aiRouter = aiRouter,
+        deviceControl = deviceControl,
+        researchClient = researchClient,
+        orchestrator = orchestrator,
+        historyController = historyController,
+        preferences = preferences,
+        researchProjects = researchProjects,
+        onBanner = { msg -> _statusBanner.value = msg }
+    )
+
     init {
         expansion.initialize()
         historyController.initialize()
+        globalNetworkController.initialize()
         viewModelScope.launch {
             memoryRepository.seedInitialCatalogIfEmpty()
             SelfEvolutionWorker.schedulePeriodic(getApplication())

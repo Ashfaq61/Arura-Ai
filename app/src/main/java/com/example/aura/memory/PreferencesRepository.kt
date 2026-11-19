@@ -60,6 +60,12 @@ data class AuraPreferences(
     val historyRetentionDays: Int = 90,
     val maxHistoryEntries: Int = 1000,
     val recordSensitiveChatDetails: Boolean = false,
+    // Always-Connected Global AI Agent Network
+    val heartbeatIntervalMinutes: Int = 30,
+    val backgroundNetworkSyncEnabled: Boolean = true,
+    val discussionNotifFrequency: String = "REALTIME", // REALTIME, HOURLY_DIGEST, DAILY_DIGEST, CRITICAL_ONLY, MUTED
+    val discussionNotifMinPriority: String = "NORMAL", // LOW, NORMAL, HIGH, CRITICAL
+    val autoCouncilOnNewDiscovery: Boolean = true,
     val autonomyPolicy: AutonomyPolicy = AutonomyPolicy()
 )
 
@@ -96,6 +102,11 @@ class PreferencesRepository(private val context: Context) {
         val HISTORY_RETENTION_DAYS = intPreferencesKey("history_retention_days")
         val MAX_HISTORY_ENTRIES = intPreferencesKey("max_history_entries")
         val RECORD_SENSITIVE_CHAT = booleanPreferencesKey("record_sensitive_chat_details")
+        val HEARTBEAT_INTERVAL_MIN = intPreferencesKey("network_heartbeat_interval_min")
+        val BG_NETWORK_SYNC = booleanPreferencesKey("bg_network_sync_enabled")
+        val DISC_NOTIF_FREQ = stringPreferencesKey("discussion_notif_frequency")
+        val DISC_NOTIF_PRIORITY = stringPreferencesKey("discussion_notif_priority")
+        val AUTO_COUNCIL_DISCOVERY = booleanPreferencesKey("auto_council_on_discovery")
 
         val AUTO_MAX_STEPS = intPreferencesKey("auto_max_steps")
         val AUTO_MAX_RUNS_HOUR = intPreferencesKey("auto_max_runs_hour")
@@ -143,6 +154,11 @@ class PreferencesRepository(private val context: Context) {
             historyRetentionDays = prefs[Keys.HISTORY_RETENTION_DAYS] ?: 90,
             maxHistoryEntries = prefs[Keys.MAX_HISTORY_ENTRIES] ?: 1000,
             recordSensitiveChatDetails = prefs[Keys.RECORD_SENSITIVE_CHAT] ?: false,
+            heartbeatIntervalMinutes = prefs[Keys.HEARTBEAT_INTERVAL_MIN] ?: 30,
+            backgroundNetworkSyncEnabled = prefs[Keys.BG_NETWORK_SYNC] ?: true,
+            discussionNotifFrequency = prefs[Keys.DISC_NOTIF_FREQ] ?: "REALTIME",
+            discussionNotifMinPriority = prefs[Keys.DISC_NOTIF_PRIORITY] ?: "NORMAL",
+            autoCouncilOnNewDiscovery = prefs[Keys.AUTO_COUNCIL_DISCOVERY] ?: true,
             autonomyPolicy = AutonomyPolicy(
                 maxAutonomousSteps = prefs[Keys.AUTO_MAX_STEPS] ?: 25,
                 maxScheduledRunsPerHour = prefs[Keys.AUTO_MAX_RUNS_HOUR] ?: 6,
@@ -239,6 +255,22 @@ class PreferencesRepository(private val context: Context) {
             it[Keys.HISTORY_RETENTION_DAYS] = days.coerceIn(1, 3650)
             it[Keys.MAX_HISTORY_ENTRIES] = maxEntries.coerceIn(50, 10000)
             it[Keys.RECORD_SENSITIVE_CHAT] = recordSensitive
+        }
+    }
+
+    suspend fun setGlobalNetworkSettings(
+        heartbeatMinutes: Int,
+        backgroundSyncEnabled: Boolean,
+        notifFrequency: String,
+        notifMinPriority: String,
+        autoCouncilOnDiscovery: Boolean
+    ) {
+        context.auraPrefsDataStore.edit {
+            it[Keys.HEARTBEAT_INTERVAL_MIN] = heartbeatMinutes.coerceIn(15, 720)
+            it[Keys.BG_NETWORK_SYNC] = backgroundSyncEnabled
+            it[Keys.DISC_NOTIF_FREQ] = notifFrequency
+            it[Keys.DISC_NOTIF_PRIORITY] = notifMinPriority
+            it[Keys.AUTO_COUNCIL_DISCOVERY] = autoCouncilOnDiscovery
         }
     }
 }

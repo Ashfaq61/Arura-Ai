@@ -347,73 +347,82 @@ class HistorySearchAndExportManager(
     fun exportToPdf(hits: List<HistorySearchHit>): Result<ExportedHistoryArtifact> = runCatching {
         val dir = ensureExportDir()
         val file = File(dir, "aura_history_${System.currentTimeMillis()}.pdf")
-        val doc = PdfDocument()
-        val pageWidth = 595
-        val pageHeight = 842
-        val margin = 36f
-        val lineHeight = 14f
-
-        val titlePaint = Paint().apply {
-            color = Color.BLACK
-            textSize = 14f
-            isFakeBoldText = true
-        }
-        val bodyPaint = Paint().apply {
-            color = Color.DKGRAY
-            textSize = 9.5f
-        }
-        val headerPaint = Paint().apply {
-            color = Color.rgb(20, 70, 140)
-            textSize = 10.5f
-            isFakeBoldText = true
-        }
-
         var pageNum = 1
-        var page = doc.startPage(PdfDocument.PageInfo.Builder(pageWidth, pageHeight, pageNum).create())
-        var canvas = page.canvas
-        var y = 44f
+        val nativeWorked = runCatching {
+            val doc = PdfDocument()
+            try {
+                val pageWidth = 595
+                val pageHeight = 842
+                val margin = 36f
+                val lineHeight = 14f
 
-        canvas.drawText("AURA AI — Agent History, Audit & Feature Control Export", margin, y, titlePaint)
-        y += 18f
-        canvas.drawText("Exported: ${dateFmt.format(Date())} | Records: ${hits.size} | Secrets Redacted: YES", margin, y, bodyPaint)
-        y += 22f
-
-        fun newPageIfNeeded(neededLines: Int) {
-            if (y + neededLines * lineHeight > pageHeight - 40f) {
-                doc.finishPage(page)
-                pageNum++
-                page = doc.startPage(PdfDocument.PageInfo.Builder(pageWidth, pageHeight, pageNum).create())
-                canvas = page.canvas
-                y = 44f
-            }
-        }
-
-        if (hits.isEmpty()) {
-            canvas.drawText("No records matched the active search filter.", margin, y, bodyPaint)
-        } else {
-            hits.take(150).forEach { h ->
-                val summaryLines = scrub(h.summary).replace('\n', ' ').chunked(88).take(3)
-                newPageIfNeeded(3 + summaryLines.size)
-                canvas.drawText(
-                    "[${h.domain.name}] ${scrub(h.title).take(72)}",
-                    margin, y, headerPaint
-                )
-                y += lineHeight
-                canvas.drawText(
-                    "${dateFmt.format(Date(h.timestamp))} | Agents: ${scrub(h.agentOrActor).take(40)} | Status: ${h.outcome}",
-                    margin, y, bodyPaint
-                )
-                y += lineHeight
-                summaryLines.forEach { ln ->
-                    canvas.drawText(ln, margin + 8f, y, bodyPaint)
-                    y += lineHeight
+                val titlePaint = Paint().apply {
+                    color = Color.BLACK
+                    textSize = 14f
+                    isFakeBoldText = true
                 }
-                y += 6f
+                val bodyPaint = Paint().apply {
+                    color = Color.DKGRAY
+                    textSize = 9.5f
+                }
+                val headerPaint = Paint().apply {
+                    color = Color.rgb(20, 70, 140)
+                    textSize = 10.5f
+                    isFakeBoldText = true
+                }
+
+                var page = doc.startPage(PdfDocument.PageInfo.Builder(pageWidth, pageHeight, pageNum).create())
+                var canvas = page.canvas
+                var y = 44f
+
+                canvas.drawText("AURA AI — Agent History, Audit & Feature Control Export", margin, y, titlePaint)
+                y += 18f
+                canvas.drawText("Exported: ${dateFmt.format(Date())} | Records: ${hits.size} | Secrets Redacted: YES", margin, y, bodyPaint)
+                y += 22f
+
+                fun newPageIfNeeded(neededLines: Int) {
+                    if (y + neededLines * lineHeight > pageHeight - 40f) {
+                        doc.finishPage(page)
+                        pageNum++
+                        page = doc.startPage(PdfDocument.PageInfo.Builder(pageWidth, pageHeight, pageNum).create())
+                        canvas = page.canvas
+                        y = 44f
+                    }
+                }
+
+                if (hits.isEmpty()) {
+                    canvas.drawText("No records matched the active search filter.", margin, y, bodyPaint)
+                } else {
+                    hits.take(150).forEach { h ->
+                        val summaryLines = scrub(h.summary).replace('\n', ' ').chunked(88).take(3)
+                        newPageIfNeeded(3 + summaryLines.size)
+                        canvas.drawText(
+                            "[${h.domain.name}] ${scrub(h.title).take(72)}",
+                            margin, y, headerPaint
+                        )
+                        y += lineHeight
+                        canvas.drawText(
+                            "${dateFmt.format(Date(h.timestamp))} | Agents: ${scrub(h.agentOrActor).take(40)} | Status: ${h.outcome}",
+                            margin, y, bodyPaint
+                        )
+                        y += lineHeight
+                        summaryLines.forEach { ln ->
+                            canvas.drawText(ln, margin + 8f, y, bodyPaint)
+                            y += lineHeight
+                        }
+                        y += 6f
+                    }
+                }
+                doc.finishPage(page)
+                file.outputStream().use { out -> doc.writeTo(out) }
+            } finally {
+                runCatching { doc.close() }
             }
+        }.isSuccess && file.exists() && file.length() > 32L
+
+        if (!nativeWorked) {
+            pageNum = writeFallbackPdf14(file, hits)
         }
-        doc.finishPage(page)
-        file.outputStream().use { out -> doc.writeTo(out) }
-        doc.close()
 
         ExportedHistoryArtifact(
             format = "PDF",
@@ -422,6 +431,70 @@ class HistorySearchAndExportManager(
             itemCount = hits.size,
             previewSnippet = "PDF (${file.length()} bytes, $pageNum page(s)) saved to ${file.name}"
         )
+    }
+
+    private fun writeFallbackPdf14(file: File, hits: List<HistorySearchHit>): Int {
+        val lines = mutableListOf<String>()
+        lines += "AURA AI - Agent History, Audit & Feature Control Export"
+        lines += "Exported: ${dateFmt.format(Date())} | Records: ${hits.size} | Secrets Redacted: YES"
+        lines += ""
+        if (hits.isEmpty()) {
+            lines += "No records matched the active search filter."
+        } else {
+            hits.take(150).forEach { h ->
+                lines += "[${h.domain.name}] ${scrub(h.title).take(76)}"
+                lines += "  ${dateFmt.format(Date(h.timestamp))} | ${scrub(h.agentOrActor).take(42)} | ${h.outcome}"
+                scrub(h.summary).replace('\n', ' ').chunked(84).take(2).forEach { ln ->
+                    lines += "  $ln"
+                }
+            }
+        }
+
+        val pages = lines.chunked(48).ifEmpty { listOf(listOf("AURA AI Empty Export")) }
+        val objects = mutableListOf<String>()
+        // 1: Catalog, 2: Pages, 3: Font Helvetica, then pairs of (Page, ContentStream)
+        val pageObjIds = pages.indices.map { 4 + it * 2 }
+        objects += "<< /Type /Catalog /Pages 2 0 R >>"
+        objects += "<< /Type /Pages /Kids [ ${pageObjIds.joinToString(" ") { "$it 0 R" }} ] /Count ${pages.size} >>"
+        objects += "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"
+
+        pages.forEachIndexed { idx, pageLines ->
+            val pageId = 4 + idx * 2
+            val contentId = pageId + 1
+            objects += "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents $contentId 0 R >>"
+            val streamText = buildString {
+                appendLine("BT")
+                appendLine("/F1 10 Tf")
+                appendLine("36 800 Td")
+                appendLine("14 TL")
+                pageLines.forEachIndexed { lineIdx, raw ->
+                    val safe = raw
+                        .replace("\\", "\\\\")
+                        .replace("(", "\\(")
+                        .replace(")", "\\)")
+                        .replace(Regex("[^\\x20-\\x7E]"), " ")
+                    if (lineIdx == 0) appendLine("($safe) Tj") else appendLine("T* ($safe) Tj")
+                }
+                appendLine("ET")
+            }
+            objects += "<< /Length ${streamText.toByteArray(Charsets.US_ASCII).size} >>\nstream\n${streamText}endstream"
+        }
+
+        val pdf = StringBuilder("%PDF-1.4\n")
+        val offsets = mutableListOf(0)
+        objects.forEachIndexed { index, body ->
+            offsets += pdf.length
+            pdf.append("${index + 1} 0 obj\n$body\nendobj\n")
+        }
+        val xrefPos = pdf.length
+        pdf.append("xref\n0 ${objects.size + 1}\n")
+        pdf.append("0000000000 65535 f \n")
+        offsets.drop(1).forEach { off ->
+            pdf.append(String.format(Locale.US, "%010d 00000 n \n", off))
+        }
+        pdf.append("trailer\n<< /Size ${objects.size + 1} /Root 1 0 R >>\nstartxref\n$xrefPos\n%%EOF\n")
+        file.writeText(pdf.toString(), Charsets.US_ASCII)
+        return pages.size
     }
 
     fun buildShareIntent(artifact: ExportedHistoryArtifact): Intent? {

@@ -64,10 +64,19 @@ fun AgentsAndEvolutionScreen(viewModel: AuraViewModel) {
     val agents by viewModel.agents.collectAsStateWithLifecycle()
     val proposals by viewModel.historyController.changeProposals.collectAsStateWithLifecycle()
     val pendingProposalsCount = proposals.count { it.status == "PENDING" }
+    val netNodes by viewModel.globalNetworkController.agentNodes.collectAsStateWithLifecycle()
+    val netNotifs by viewModel.globalNetworkController.notifications.collectAsStateWithLifecycle()
+    val connectedNetCount = netNodes.count { it.connectionStatus == com.example.aura.network.AgentConnectionStatus.CONNECTED }
+    val unreadNotifCount = netNotifs.count { !it.read }
+    var archiveAgentPrefilter by remember { mutableStateOf("") }
     var inspectedAgent by remember { mutableStateOf<SpecialistAgent?>(null) }
 
     val tabs = listOf(
         "Agents (${agents.size})",
+        "Network ($connectedNetCount/${netNodes.size})",
+        "AI Council",
+        "Global AI Chat",
+        if (unreadNotifCount > 0) "Live Monitor ($unreadNotifCount)" else "Live Monitor",
         "Comm History",
         "Live Activity",
         "Add Feature",
@@ -101,23 +110,39 @@ fun AgentsAndEvolutionScreen(viewModel: AuraViewModel) {
 
         when (subTab) {
             0 -> AgentsMeshTab(viewModel = viewModel, onInspectAgent = { inspectedAgent = it })
-            1 -> AgentCommHistoryTab(viewModel = viewModel, onOpenAgentProfile = { inspectedAgent = it })
-            2 -> LiveAgentActivityTab(viewModel = viewModel)
-            3 -> AddFeatureRequestTab(viewModel = viewModel)
-            4 -> FeatureDiscoveryInboxTab(viewModel = viewModel)
-            5 -> FeatureRegistryHistoryTab(viewModel = viewModel)
-            6 -> ChangeApprovalAndRollbackTab(viewModel = viewModel)
-            7 -> GlobalHistorySearchAndRetentionTab(viewModel = viewModel)
-            8 -> LongHorizonPlannerTab(viewModel)
-            9 -> SkillMemoryTab(viewModel)
-            10 -> ScheduledTasksTab(viewModel)
-            11 -> SelfEvolutionTab(viewModel)
-            12 -> ResearchHubTab(viewModel)
-            13 -> ToolFactoryTab(viewModel)
-            14 -> SmartRoutinesTab(viewModel)
-            15 -> VisualWorkflowBuilderTab(viewModel)
-            16 -> AutomationRecipesTab(viewModel)
-            17 -> AppCompatibilityTab(viewModel)
+            1 -> GlobalAgentNetworkTab(
+                viewModel = viewModel,
+                onOpenAgentChatHistory = { agentName ->
+                    archiveAgentPrefilter = agentName
+                    subTab = 3
+                }
+            )
+            2 -> GlobalDiscussionCouncilTab(viewModel = viewModel)
+            3 -> GlobalAiChatHistoryTab(
+                viewModel = viewModel,
+                initialAgentFilter = archiveAgentPrefilter
+            )
+            4 -> LiveDiscussionMonitorTab(
+                viewModel = viewModel,
+                onOpenSessionDetail = { _ -> subTab = 2 }
+            )
+            5 -> AgentCommHistoryTab(viewModel = viewModel, onOpenAgentProfile = { inspectedAgent = it })
+            6 -> LiveAgentActivityTab(viewModel = viewModel)
+            7 -> AddFeatureRequestTab(viewModel = viewModel)
+            8 -> FeatureDiscoveryInboxTab(viewModel = viewModel)
+            9 -> FeatureRegistryHistoryTab(viewModel = viewModel)
+            10 -> ChangeApprovalAndRollbackTab(viewModel = viewModel)
+            11 -> GlobalHistorySearchAndRetentionTab(viewModel = viewModel)
+            12 -> LongHorizonPlannerTab(viewModel)
+            13 -> SkillMemoryTab(viewModel)
+            14 -> ScheduledTasksTab(viewModel)
+            15 -> SelfEvolutionTab(viewModel)
+            16 -> ResearchHubTab(viewModel)
+            17 -> ToolFactoryTab(viewModel)
+            18 -> SmartRoutinesTab(viewModel)
+            19 -> VisualWorkflowBuilderTab(viewModel)
+            20 -> AutomationRecipesTab(viewModel)
+            21 -> AppCompatibilityTab(viewModel)
         }
     }
 

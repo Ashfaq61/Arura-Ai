@@ -94,6 +94,7 @@ class AuraOrchestrator(
     @Volatile var historyRecorder: AgentHistoryRecorder? = null
     @Volatile var featurePipeline: FeatureControlPipelineEngine? = null
     @Volatile var onFeatureInboxLookupTopId: (suspend () -> String?)? = null
+    @Volatile var onLatestDiscussionLookup: (suspend () -> Pair<String, String>?)? = null
 
     suspend fun processInstruction(
         instruction: String,
@@ -144,12 +145,21 @@ class AuraOrchestrator(
         val pipeline = featurePipeline
         if (parsedFeatureCmd != null && pipeline != null) {
             _currentLoopPhase.value = "FEATURE_PIPELINE"
-            val linkedRecId = if (parsedFeatureCmd.prefersRecommendedInboxItem) {
-                onFeatureInboxLookupTopId?.invoke().orEmpty()
-            } else ""
+            val discussionInfo = if (parsedFeatureCmd.prefersDiscussionProposal) {
+                onLatestDiscussionLookup?.invoke()
+            } else null
+            val linkedRecId = when {
+                discussionInfo != null -> discussionInfo.second
+                parsedFeatureCmd.prefersRecommendedInboxItem -> onFeatureInboxLookupTopId?.invoke().orEmpty()
+                else -> ""
+            }
+            val effectivePrompt = if (discussionInfo != null) {
+                "Promote discussion proposal: ${discussionInfo.first}"
+            } else parsedFeatureCmd.prompt
+            val effectiveMode = if (parsedFeatureCmd.requestMode == "FROM_DISCUSSION") "FROM_RECOMMENDATION" else parsedFeatureCmd.requestMode
             val req = pipeline.submitFeatureRequest(
-                userPrompt = parsedFeatureCmd.prompt,
-                requestMode = parsedFeatureCmd.requestMode,
+                userPrompt = effectivePrompt,
+                requestMode = effectiveMode,
                 linkedSourceId = linkedRecId,
                 prefs = prefs
             )

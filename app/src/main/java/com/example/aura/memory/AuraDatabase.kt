@@ -40,9 +40,15 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         FeatureRegistryHistoryEntity::class,
         FeatureRequestEntity::class,
         FeatureRecommendationEntity::class,
-        PendingChangeProposalEntity::class
+        PendingChangeProposalEntity::class,
+        // Always-Connected Global AI Agent Network v5 entities
+        ConnectedAgentNodeEntity::class,
+        GlobalDiscussionSessionEntity::class,
+        GlobalDiscussionTurnEntity::class,
+        QueuedAgentMessageEntity::class,
+        AgentNotificationEventEntity::class
     ],
-    version = 4,
+    version = 5,
     exportSchema = false
 )
 abstract class AuraDatabase : RoomDatabase() {
@@ -79,6 +85,13 @@ abstract class AuraDatabase : RoomDatabase() {
     abstract fun featureRequestDao(): FeatureRequestDao
     abstract fun featureRecommendationDao(): FeatureRecommendationDao
     abstract fun pendingChangeProposalDao(): PendingChangeProposalDao
+
+    // Always-Connected Global AI Agent Network v5 DAOs
+    abstract fun connectedAgentNodeDao(): ConnectedAgentNodeDao
+    abstract fun globalDiscussionSessionDao(): GlobalDiscussionSessionDao
+    abstract fun globalDiscussionTurnDao(): GlobalDiscussionTurnDao
+    abstract fun queuedAgentMessageDao(): QueuedAgentMessageDao
+    abstract fun agentNotificationEventDao(): AgentNotificationEventDao
 
     companion object {
         @Volatile
@@ -310,6 +323,73 @@ abstract class AuraDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """CREATE TABLE IF NOT EXISTS `connected_agent_nodes` (
+                        `nodeId` TEXT NOT NULL PRIMARY KEY,
+                        `name` TEXT NOT NULL, `category` TEXT NOT NULL,
+                        `providerOrPlatform` TEXT NOT NULL, `modelName` TEXT NOT NULL,
+                        `endpointUrl` TEXT NOT NULL, `connectionStatus` TEXT NOT NULL,
+                        `trustStatus` TEXT NOT NULL, `isBuiltIn` INTEGER NOT NULL,
+                        `enabled` INTEGER NOT NULL, `autoHeartbeatEnabled` INTEGER NOT NULL,
+                        `heartbeatIntervalMinutes` INTEGER NOT NULL, `webhookUrl` TEXT NOT NULL,
+                        `allowedCapabilitiesCsv` TEXT NOT NULL, `lastHeartbeatAt` INTEGER,
+                        `lastLatencyMs` INTEGER NOT NULL, `lastErrorMessage` TEXT NOT NULL,
+                        `createdAt` INTEGER NOT NULL
+                    )"""
+                )
+                db.execSQL(
+                    """CREATE TABLE IF NOT EXISTS `global_discussion_sessions` (
+                        `sessionId` TEXT NOT NULL PRIMARY KEY,
+                        `topic` TEXT NOT NULL, `topicCategory` TEXT NOT NULL,
+                        `topicFingerprint` TEXT NOT NULL, `initiatorAgent` TEXT NOT NULL,
+                        `participatingAgentsCsv` TEXT NOT NULL, `originalQuestion` TEXT NOT NULL,
+                        `councilSummary` TEXT NOT NULL, `finalRecommendation` TEXT NOT NULL,
+                        `decisionType` TEXT NOT NULL, `decisionReasoning` TEXT NOT NULL,
+                        `proposedFeatureName` TEXT NOT NULL, `proposedFeatureDescription` TEXT NOT NULL,
+                        `advantagesSummary` TEXT NOT NULL, `sourceLinksCsv` TEXT NOT NULL,
+                        `licenseAndSecurity` TEXT NOT NULL, `androidCompatibility` TEXT NOT NULL,
+                        `technicalRequirements` TEXT NOT NULL, `risksSummary` TEXT NOT NULL,
+                        `implementationPlan` TEXT NOT NULL, `testResults` TEXT NOT NULL,
+                        `linkedFeatureRequestId` TEXT NOT NULL, `linkedRecommendationId` TEXT NOT NULL,
+                        `relatedSessionIdsCsv` TEXT NOT NULL, `status` TEXT NOT NULL,
+                        `progressPercent` INTEGER NOT NULL, `startedAt` INTEGER NOT NULL,
+                        `updatedAt` INTEGER NOT NULL, `completedAt` INTEGER
+                    )"""
+                )
+                db.execSQL(
+                    """CREATE TABLE IF NOT EXISTS `global_discussion_turns` (
+                        `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        `sessionId` TEXT NOT NULL, `speakerAgent` TEXT NOT NULL,
+                        `targetAgent` TEXT NOT NULL, `providerOrPlatform` TEXT NOT NULL,
+                        `modelName` TEXT NOT NULL, `stance` TEXT NOT NULL,
+                        `messageText` TEXT NOT NULL, `evidenceLinksCsv` TEXT NOT NULL,
+                        `injectionSanitized` INTEGER NOT NULL, `timestamp` INTEGER NOT NULL
+                    )"""
+                )
+                db.execSQL(
+                    """CREATE TABLE IF NOT EXISTS `queued_agent_messages` (
+                        `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        `targetNodeId` TEXT NOT NULL, `targetAgentName` TEXT NOT NULL,
+                        `sessionId` TEXT NOT NULL, `payload` TEXT NOT NULL,
+                        `retryCount` INTEGER NOT NULL, `status` TEXT NOT NULL,
+                        `lastError` TEXT NOT NULL, `createdAt` INTEGER NOT NULL,
+                        `updatedAt` INTEGER NOT NULL
+                    )"""
+                )
+                db.execSQL(
+                    """CREATE TABLE IF NOT EXISTS `agent_notification_events` (
+                        `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        `category` TEXT NOT NULL, `priority` TEXT NOT NULL,
+                        `title` TEXT NOT NULL, `body` TEXT NOT NULL,
+                        `relatedSessionId` TEXT NOT NULL, `relatedRequestId` TEXT NOT NULL,
+                        `read` INTEGER NOT NULL, `createdAt` INTEGER NOT NULL
+                    )"""
+                )
+            }
+        }
+
         fun getInstance(context: Context): AuraDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -317,7 +397,7 @@ abstract class AuraDatabase : RoomDatabase() {
                     AuraDatabase::class.java,
                     "aura_autonomous_db"
                 )
-                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
                     .build()
                     .also { INSTANCE = it }
             }

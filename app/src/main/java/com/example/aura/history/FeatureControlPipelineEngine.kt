@@ -1030,13 +1030,14 @@ class FeatureControlPipelineEngine(
 
     private fun detectRequiredPermissions(prompt: String, rec: FeatureRecommendationEntity?): String {
         val lower = "${prompt.lowercase()} ${rec?.summaryWhatItDoes?.lowercase().orEmpty()}"
+            .replace("without network calls", "offline")
         val perms = mutableListOf<String>()
-        if (lower.contains("sms") || lower.contains("whatsapp") || lower.contains("message")) perms += "MESSAGING_INTENT"
-        if (lower.contains("call")) perms += "CALL_PHONE"
-        if (lower.contains("camera") || lower.contains("ocr")) perms += "CAMERA"
-        if (lower.contains("mic") || lower.contains("voice") || lower.contains("whisper")) perms += "RECORD_AUDIO"
-        if (lower.contains("calendar")) perms += "READ/WRITE_CALENDAR"
-        if (lower.contains("github") || lower.contains("api")) perms += "INTERNET"
+        if (Regex("\\b(sms|whatsapp|send message|text message|messaging)\\b").containsMatchIn(lower)) perms += "MESSAGING_INTENT"
+        if (Regex("\\b(phone call|voice call|make (a )?call|dial|call_phone|call log)\\b").containsMatchIn(lower)) perms += "CALL_PHONE"
+        if (Regex("\\b(camera|ocr)\\b").containsMatchIn(lower)) perms += "CAMERA"
+        if (Regex("\\b(mic|microphone|voice|whisper|record_audio)\\b").containsMatchIn(lower)) perms += "RECORD_AUDIO"
+        if (Regex("\\bcalendar\\b").containsMatchIn(lower)) perms += "READ/WRITE_CALENDAR"
+        if (Regex("\\b(github|api)\\b").containsMatchIn(lower)) perms += "INTERNET"
         return if (perms.isEmpty()) "None (Sandboxed Local MCP)" else perms.joinToString(", ")
     }
 }

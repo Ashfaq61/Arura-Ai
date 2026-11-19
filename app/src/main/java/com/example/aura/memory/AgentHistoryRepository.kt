@@ -116,7 +116,7 @@ class AgentHistoryRepository(private val db: AuraDatabase) {
                     FeatureRecommendationEntity(
                         id = "rec_offline_summarizer_mcp",
                         featureName = "Structured Daily Briefing Digest MCP",
-                        summaryWhatItDoes = "Aggregates notifications, upcoming reminders, and device health into a single morning or evening briefing tool without network calls.",
+                        summaryWhatItDoes = "Aggregates notifications, upcoming reminders, and device health into a single morning or evening briefing tool completely offline.",
                         whyAuraNeedsIt = "Reduces repetitive multi-step chat prompts when the user asks for daily summaries offline.",
                         limitationSolved = "Currently requires separate commands for Notifications, Productivity, and Device Health.",
                         discoveringAgent = "Tool Discovery Agent",
@@ -203,30 +203,6 @@ class AgentHistoryRepository(private val db: AuraDatabase) {
             }
         }
 
-        if (db.agentConversationDao().getRecent(1).isEmpty()) {
-            db.agentConversationDao().insert(
-                AgentConversationEntity(
-                    conversationId = "CONV-COUNCIL-INIT",
-                    sessionId = "SESSION-BOOT",
-                    agentId = "1",
-                    agentName = "Main Brain / Orchestrator Agent",
-                    participatingAgentsCsv = "Main Brain / Orchestrator Agent, Tool Discovery Agent, Security Agent, Testing Agent",
-                    channelType = "AI_COUNCIL",
-                    topic = "Startup Architecture & Discovery Readiness Check",
-                    userOriginalRequest = "System startup verification",
-                    qaExchangedJson = """[{"speaker":"Main Brain / Orchestrator Agent","target":"Security Agent","question":"Verify Keystore vault and no-secret logging enforcement before enabling History Center.","answer":"Verified PrivacyDataRouter + BackendServiceGateway log sanitization active.","timestamp":$now}]""",
-                    recommendationsMade = "Added Daily Briefing Digest MCP & Scoped Workspace Notes candidates to Discovery Inbox.",
-                    researchFindings = "Evaluated 3 candidate capabilities; marked external model/code references as DISCOVERED_ONLY until verified.",
-                    repositoryAndModelLinksCsv = "https://github.com/modelcontextprotocol/servers, https://huggingface.co/openai/whisper-tiny",
-                    decisionsAndReasons = "Keep external repos non-active until explicit pipeline verification & user approval.",
-                    proposedFeaturesOrToolsCsv = "Structured Daily Briefing Digest MCP",
-                    actionsPerformedCsv = "Verified baseline registry, Seeded Discovery Inbox",
-                    testResults = "Baseline security & schema checks passed",
-                    finalOutcome = "AI Council ready; Agent Communication History Center active.",
-                    sensitivityRedacted = true,
-                    timestamp = now - 1500L
-                )
-            )
-        }
+        // Never seed sample/fake conversations into agent_conversations — only real runtime conversations are recorded.
     }
 }
