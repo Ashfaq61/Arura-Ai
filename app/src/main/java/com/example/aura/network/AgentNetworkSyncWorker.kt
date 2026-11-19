@@ -14,7 +14,11 @@ import com.example.aura.ai.ModelRoutingEngine
 import com.example.aura.ai.MultiProviderRouter
 import com.example.aura.automation.DeviceControlEngine
 import com.example.aura.backend.BackendServiceGateway
+import com.example.aura.evolution.ContinuousSelfImprovementEngine
+import com.example.aura.evolution.SelfHealingEngine
 import com.example.aura.evolution.ToolFactoryAndEvolutionEngine
+import com.example.aura.github.ApkSelfUpdater
+import com.example.aura.github.GitHubSelfUpdateClient
 import com.example.aura.history.AgentHistoryRecorder
 import com.example.aura.history.FeatureControlPipelineEngine
 import com.example.aura.memory.AgentHistoryRepository
@@ -25,6 +29,7 @@ import com.example.aura.memory.PreferencesRepository
 import com.example.aura.research.GitHubAndHfResearchClient
 import com.example.aura.security.AuraKeystoreVault
 import com.example.aura.security.GeminiKeyStore
+import com.example.aura.security.GitHubKeyStore
 import com.example.aura.security.PermissionGuard
 import com.example.aura.security.PrivacyDataRouter
 import com.example.aura.security.PromptInjectionDefender
@@ -105,11 +110,35 @@ class AgentNetworkSyncWorker(
             aiRouter = aiRouter
         )
 
+        val selfImprovement = ContinuousSelfImprovementEngine(
+            context = applicationContext,
+            memoryRepository = memRepo,
+            historyRepo = histRepo,
+            historyRecorder = recorder,
+            agentNetwork = agentNet,
+            toolFactory = toolFactory,
+            pipelineEngine = pipeline,
+            researchClient = researchClient,
+            deviceControl = deviceControl,
+            selfHealing = SelfHealingEngine(applicationContext),
+            permissionGuard = permGuard,
+            gitHubClient = GitHubSelfUpdateClient(),
+            apkSelfUpdater = ApkSelfUpdater(applicationContext)
+        )
+        val gitHubConfig = GitHubKeyStore(applicationContext).loadConfig()
+
         return runCatching {
             netEngine.runHeartbeatAll(prefs)
             council.resumeInterruptedAndQueuedWork(isNetworkOnline = true, prefs = prefs)
             if (prefs.autoCouncilOnNewDiscovery) {
                 council.runLiveTechWatchSweep(prefs)
+            }
+            if (prefs.zeroQuestionAutonomyEnabled) {
+                selfImprovement.runAutonomousCycle(
+                    focusTopic = "android ai agent tools",
+                    prefs = prefs,
+                    gitHubConfig = gitHubConfig
+                )
             }
             Result.success()
         }.getOrElse {

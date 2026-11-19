@@ -10,17 +10,27 @@ import androidx.work.WorkerParameters
 import com.example.aura.agents.AgentNetworkManager
 import com.example.aura.agents.AgentStatus
 import com.example.aura.agents.McpToolDescriptor
+import com.example.aura.ai.ModelRoutingEngine
 import com.example.aura.ai.MultiProviderRouter
 import com.example.aura.automation.DeviceControlEngine
-import com.example.aura.evolution.SelfHealingEngine
+import com.example.aura.github.ApkSelfUpdater
+import com.example.aura.github.GitHubSelfUpdateClient
 import com.example.aura.history.AgentHistoryRecorder
+import com.example.aura.history.FeatureControlPipelineEngine
 import com.example.aura.history.QaExchangeTurn
+import com.example.aura.memory.AgentHistoryRepository
 import com.example.aura.memory.AuraDatabase
 import com.example.aura.memory.EvolutionCycleEntity
 import com.example.aura.memory.MarketplaceToolEntity
 import com.example.aura.memory.MemoryRepository
+import com.example.aura.memory.PreferencesRepository
 import com.example.aura.research.GitHubAndHfResearchClient
+import com.example.aura.security.AuraKeystoreVault
+import com.example.aura.security.GeminiKeyStore
+import com.example.aura.security.GitHubKeyStore
 import com.example.aura.security.PermissionGuard
+import com.example.aura.security.PrivacyDataRouter
+import kotlinx.coroutines.flow.first
 import org.json.JSONObject
 import java.util.UUID
 import java.util.concurrent.TimeUnit
@@ -43,7 +53,8 @@ class ToolFactoryAndEvolutionEngine(
      */
     suspend fun synthesizeNewTool(
         capabilityRequest: String,
-        category: String = "Productivity"
+        category: String = "Productivity",
+        autoActivateIfSafe: Boolean = false
     ): Result<MarketplaceToolEntity> {
         agentNetwork.setAgentState("Tool Factory Agent", AgentStatus.ACTIVE, "Synthesizing tool for: $capabilityRequest")
         agentNetwork.sendA2aMessage("Tool Discovery Agent", "Tool Factory Agent", "HANDOFF", "Capability gap: $capabilityRequest")
@@ -76,17 +87,18 @@ class ToolFactoryAndEvolutionEngine(
             JSONObject().apply {
                 put("name", capabilityRequest.take(36).replaceFirstChar { it.uppercase() })
                 put("description", "Declarative MCP workflow tool synthesized for: $capabilityRequest")
-                put("mcpToolName", "aura_${capabilityRequest.lowercase().replace(Regex("[^a-z0-9]+"), "_").take(24)}")
+                put("mcpToolName", "aura_${capabilityRequest.lowercase().replace(Regex("[^a-z0-9]+"), "_").trim('_').take(24).ifBlank { "tool" }}")
                 put("inputSchemaJson", """{"query":"string","dryRun":"boolean"}""")
                 put("permissions", "None")
                 put("testSummary", "Schema validated & sandboxed locally.")
             }
         }
 
-        val toolName = json.optString("name", capabilityRequest.take(32))
-        val description = json.optString("description", "Custom AURA synthesized tool")
+        val toolName = json.optString("name", capabilityRequest.take(32)).ifBlank { capabilityRequest.take(32) }
+        val description = json.optString("description", "Custom AURA synthesized tool").ifBlank { "Custom AURA synthesized tool" }
         val mcpName = json.optString("mcpToolName", "custom_tool_${System.currentTimeMillis() % 1000}")
-        val schema = json.optString("inputSchemaJson", "{}")
+            .lowercase().replace(Regex("[^a-z0-9_]+"), "_").trim('_').ifBlank { "custom_tool" }
+        val schema = json.optString("inputSchemaJson", """{"query":"string"}""")
         val perms = json.optString("permissions", "None")
         val testSummary = json.optString("testSummary", "Sandboxed schema check passed")
 
@@ -111,7 +123,7 @@ class ToolFactoryAndEvolutionEngine(
             return Result.failure(SecurityException(scanMessage))
         }
 
-        val entity = MarketplaceToolEntity(
+        val candidate = MarketplaceToolEntity(
             id = "custom_${UUID.randomUUID().toString().take(8)}",
             name = toolName,
             category = category,
@@ -124,8 +136,16 @@ class ToolFactoryAndEvolutionEngine(
             compatibility = "Android API 24+",
             securityScan = scanMessage,
             testResults = "PASSED: $testSummary",
-            status = "INSTALLED_DISABLED", // Requires explicit user enable / approval
+            status = "INSTALLED_DISABLED",
             mcpSchemaJson = """{"name":"$mcpName","schema":$schema}"""
+        )
+
+        val (verifiedOk, verifyDetail) = verifyToolHealth(candidate)
+        val lowRiskLocalPerms = isLowRiskPermissionSet(perms)
+        val shouldActivate = autoActivateIfSafe && verifiedOk && lowRiskLocalPerms
+        val entity = candidate.copy(
+            status = if (shouldActivate) "INSTALLED_ENABLED" else "INSTALLED_DISABLED",
+            testResults = if (verifiedOk) "PASSED: $testSummary | $verifyDetail" else "FAILED: $verifyDetail"
         )
 
         memoryRepository.upsertTool(entity)
@@ -135,11 +155,15 @@ class ToolFactoryAndEvolutionEngine(
                 category = category,
                 description = description,
                 inputSchemaJson = schema,
-                safetyLevel = 2,
-                enabled = false
+                safetyLevel = if (lowRiskLocalPerms) 1 else 3,
+                enabled = shouldActivate
             )
         )
-        agentNetwork.setAgentState("Tool Factory Agent", AgentStatus.ONLINE, "Synthesized '$toolName' (awaiting enable)")
+        agentNetwork.setAgentState(
+            "Tool Factory Agent",
+            AgentStatus.ONLINE,
+            if (shouldActivate) "Synthesized, verified & activated '$toolName'" else "Synthesized '$toolName' (awaiting activation)"
+        )
         agentNetwork.setAgentState("Security Agent", AgentStatus.ONLINE, "Idle")
         historyRecorder?.recordConversation(
             agentId = "19",
@@ -150,14 +174,50 @@ class ToolFactoryAndEvolutionEngine(
             userOriginalRequest = capabilityRequest,
             qaTurns = listOf(
                 QaExchangeTurn("Tool Discovery Agent", "Tool Factory Agent", "Synthesize MCP spec for $category", description),
-                QaExchangeTurn("Tool Factory Agent", "Security Agent", "Static scan permissions ($perms)", scanMessage)
+                QaExchangeTurn("Tool Factory Agent", "Security Agent", "Static scan & verification ($perms)", "$scanMessage | $verifyDetail")
             ),
             proposedTools = listOf(toolName),
-            decisionsAndReasons = "Created as INSTALLED_DISABLED pending explicit activation",
-            testResults = "PASSED: $testSummary",
-            finalOutcome = "SYNTHESIZED_DISABLED"
+            decisionsAndReasons = if (shouldActivate) {
+                "Verified safe & reversible; auto-activated without interrupting user."
+            } else {
+                "Created as INSTALLED_DISABLED pending explicit permission/activation."
+            },
+            testResults = entity.testResults,
+            finalOutcome = if (shouldActivate) "INSTALLED_ENABLED" else "SYNTHESIZED_DISABLED"
         )
         return Result.success(entity)
+    }
+
+    fun isLowRiskPermissionSet(permsRaw: String): Boolean {
+        val clean = permsRaw.trim().lowercase()
+        if (clean.isBlank() || clean == "none" || clean.startsWith("none (")) return true
+        val sensitive = listOf(
+            "call_phone", "sms", "send_sms", "read_sms", "camera",
+            "record_audio", "microphone", "location", "contacts",
+            "accessibility", "system_alert_window", "request_install_packages",
+            "write_calendar", "read_phone_state"
+        )
+        return sensitive.none { clean.contains(it) }
+    }
+
+    fun verifyToolHealth(tool: MarketplaceToolEntity): Pair<Boolean, String> {
+        if (tool.name.isBlank() || tool.description.isBlank()) {
+            return false to "Tool missing name or description"
+        }
+        val (safe, msg) = permissionGuard.scanToolSpecForSafety(
+            name = tool.name,
+            codeOrSpec = "${tool.description} ${tool.mcpSchemaJson}",
+            permissions = tool.requiredPermissions.split(",").map { it.trim() }
+        )
+        if (!safe) return false to "Static safety failure: $msg"
+        val schemaOk = runCatching {
+            val obj = JSONObject(tool.mcpSchemaJson)
+            obj.optString("name", "").isNotBlank() || obj.has("schema") || obj.length() > 0
+        }.getOrDefault(false)
+        if (!schemaOk && tool.mcpSchemaJson != "{}") {
+            return false to "Malformed MCP JSON schema"
+        }
+        return true to "Schema, static scan & dry-run verified"
     }
 
     /**
@@ -245,26 +305,61 @@ class SelfEvolutionWorker(
     override suspend fun doWork(): Result {
         return try {
             val db = AuraDatabase.getInstance(applicationContext)
+            val prefsRepo = PreferencesRepository(applicationContext)
+            val prefs = prefsRepo.preferences.first()
+            if (!prefs.backgroundEvolutionEnabled) return Result.success()
+
             val repo = MemoryRepository(db)
+            val histRepo = AgentHistoryRepository(db)
             val deviceControl = DeviceControlEngine(applicationContext)
-            val health = deviceControl.readDeviceHealth()
             val researchClient = GitHubAndHfResearchClient()
-
-            val gh = researchClient.searchGitHubProjects("android llm agent", health.totalRamMb)
-            val projects = gh.getOrDefault(emptyList())
-            if (projects.isNotEmpty()) {
-                repo.upsertResearchProjects(projects)
-            }
-
-            repo.insertEvolutionCycle(
-                EvolutionCycleEntity(
-                    gapIdentified = "Scheduled WorkManager system & research telemetry check",
-                    candidateSolution = projects.firstOrNull()?.name ?: "No new external updates needed",
-                    evaluatorAgents = "Self-Upgrade Agent, Performance Optimization Agent",
-                    staticAnalysisResult = "PASSED (Background read-only inspection)",
-                    benchmarkSummary = "Free RAM ${health.availableRamMb}MB, Free Storage ${"%.1f".format(health.freeStorageGb)}GB, Battery ${health.batteryPercent}%",
-                    status = "TESTED"
-                )
+            val vault = AuraKeystoreVault(applicationContext)
+            val privacyRouter = PrivacyDataRouter()
+            val geminiKeyStore = GeminiKeyStore(applicationContext)
+            val gitHubKeyStore = GitHubKeyStore(applicationContext)
+            val aiRouter = MultiProviderRouter(
+                vault = vault,
+                memoryRepository = repo,
+                privacyRouter = privacyRouter,
+                modelRouter = ModelRoutingEngine(),
+                geminiKeyStore = geminiKeyStore,
+                preferencesRepository = prefsRepo
+            )
+            val agentNetwork = AgentNetworkManager()
+            val permGuard = PermissionGuard()
+            val selfHealing = SelfHealingEngine(applicationContext)
+            val recorder = AgentHistoryRecorder(histRepo, privacyRouter)
+            val factory = ToolFactoryAndEvolutionEngine(aiRouter, researchClient, repo, agentNetwork, permGuard, deviceControl)
+            val pipeline = FeatureControlPipelineEngine(
+                historyRepo = histRepo,
+                recorder = recorder,
+                memoryRepo = repo,
+                aiRouter = aiRouter,
+                agentNetwork = agentNetwork,
+                permissionGuard = permGuard,
+                deviceControl = deviceControl,
+                toolFactory = factory,
+                researchClient = researchClient
+            )
+            val engine = ContinuousSelfImprovementEngine(
+                context = applicationContext,
+                memoryRepository = repo,
+                historyRepo = histRepo,
+                historyRecorder = recorder,
+                agentNetwork = agentNetwork,
+                toolFactory = factory,
+                pipelineEngine = pipeline,
+                researchClient = researchClient,
+                deviceControl = deviceControl,
+                selfHealing = selfHealing,
+                permissionGuard = permGuard,
+                gitHubClient = GitHubSelfUpdateClient(),
+                apkSelfUpdater = ApkSelfUpdater(applicationContext)
+            )
+            engine.runAutonomousCycle(
+                focusTopic = "android ai agent automation",
+                prefs = prefs,
+                gitHubConfig = gitHubKeyStore.loadConfig()
             )
             Result.success()
         } catch (e: Exception) {

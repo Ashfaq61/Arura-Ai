@@ -27,6 +27,8 @@ import com.example.aura.automation.DeviceControlEngine
 import com.example.aura.automation.DeviceHealthSnapshot
 import com.example.aura.automation.NotificationBridge
 import com.example.aura.calls.PhoneCallAndMessagingManager
+import com.example.aura.evolution.AutonomousCycleReport
+import com.example.aura.evolution.ContinuousSelfImprovementEngine
 import com.example.aura.evolution.LongHorizonAndSkillEngine
 import com.example.aura.evolution.ScheduledWorkflowWorker
 import com.example.aura.evolution.SelfEvolutionWorker
@@ -398,6 +400,25 @@ class AuraViewModel(application: Application) : AndroidViewModel(application) {
         onBanner = { msg -> _statusBanner.value = msg }
     )
 
+    val continuousSelfImprovement: ContinuousSelfImprovementEngine = ContinuousSelfImprovementEngine(
+        context = application,
+        memoryRepository = memoryRepository,
+        historyRepo = historyController.historyRepo,
+        historyRecorder = historyController.recorder,
+        agentNetwork = agentNetwork,
+        toolFactory = toolFactory,
+        pipelineEngine = historyController.pipelineEngine,
+        researchClient = researchClient,
+        deviceControl = deviceControl,
+        selfHealing = selfHealing,
+        permissionGuard = permissionGuard,
+        gitHubClient = gitHubClient,
+        apkSelfUpdater = apkSelfUpdater,
+        networkOnlineProvider = { selfHealing.isNetworkOnline() }
+    )
+
+    val lastAutonomousReport: StateFlow<AutonomousCycleReport?> = continuousSelfImprovement.lastReport
+
     init {
         expansion.initialize()
         historyController.initialize()
@@ -717,18 +738,53 @@ class AuraViewModel(application: Application) : AndroidViewModel(application) {
     fun runSelfEvolutionCycle(topic: String) {
         viewModelScope.launch {
             _isBusy.value = true
-            val cycle = toolFactory.runEvolutionCycle(topic.ifBlank { "android ai agent" })
-            _statusBanner.value = "Self-Evolution Cycle #${cycle.id} proposed: ${cycle.candidateSolution}"
+            val report = continuousSelfImprovement.runAutonomousCycle(
+                focusTopic = topic.ifBlank { "android ai agent" },
+                prefs = preferences.value,
+                gitHubConfig = _gitHubConfig.value
+            )
+            _statusBanner.value = "Autonomous Cycle #${report.cycleId} (${report.cycleStatus}): " +
+                "+${report.toolsInstalledOrActivated.size} installed, ^${report.toolsUpgraded.size} upgraded, " +
+                "+${report.agentsCreatedOrUpgraded.size} agents, ~${report.bugsFixedOrRolledBack.size} fixes"
             _isBusy.value = false
+        }
+    }
+
+    fun updateZeroQuestionAutonomySettings(
+        zeroQuestionEnabled: Boolean,
+        autoInstallSafeTools: Boolean,
+        autoCreateAgents: Boolean,
+        autoUpgradeAgentsAndTools: Boolean,
+        autoRollbackFaulty: Boolean,
+        autoCheckInPlaceUpdates: Boolean
+    ) {
+        viewModelScope.launch {
+            preferencesRepository.setZeroQuestionAutonomySettings(
+                zeroQuestionEnabled = zeroQuestionEnabled,
+                autoInstallSafeTools = autoInstallSafeTools,
+                autoCreateAgents = autoCreateAgents,
+                autoUpgradeAgentsAndTools = autoUpgradeAgentsAndTools,
+                autoRollbackFaulty = autoRollbackFaulty,
+                autoCheckInPlaceUpdates = autoCheckInPlaceUpdates
+            )
+            _statusBanner.value = if (zeroQuestionEnabled) {
+                "Zero-Question Autonomous Mode enabled (sensitive ops stay gated)."
+            } else {
+                "Autonomous Mode paused — manual confirmation active."
+            }
         }
     }
 
     fun synthesizeTool(capabilityRequest: String, category: String) {
         viewModelScope.launch {
             _isBusy.value = true
-            val res = toolFactory.synthesizeNewTool(capabilityRequest, category)
+            val autoActivate = preferences.value.zeroQuestionAutonomyEnabled && preferences.value.autoInstallSafeTools
+            val res = toolFactory.synthesizeNewTool(capabilityRequest, category, autoActivateIfSafe = autoActivate)
             _statusBanner.value = res.fold(
-                onSuccess = { "Tool '${it.name}' built, scanned, and added to Marketplace." },
+                onSuccess = {
+                    if (it.status == "INSTALLED_ENABLED") "Tool '${it.name}' built, verified & activated automatically."
+                    else "Tool '${it.name}' built & added to Marketplace (requires permission review)."
+                },
                 onFailure = { "Tool Factory blocked: ${it.localizedMessage}" }
             )
             _isBusy.value = false

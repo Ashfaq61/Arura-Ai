@@ -778,10 +778,19 @@ class TaskDispatcher(
             }
 
             DispatchModuleIds.TOOL_FACTORY -> {
-                val res = toolFactory.synthesizeNewTool(param.ifBlank { request.rawInstruction })
+                val autoActivate = request.prefs.zeroQuestionAutonomyEnabled && request.prefs.autoInstallSafeTools
+                val res = toolFactory.synthesizeNewTool(
+                    capabilityRequest = param.ifBlank { request.rawInstruction },
+                    autoActivateIfSafe = autoActivate
+                )
                 res.fold(
                     onSuccess = { tool ->
-                        true to "Tool Factory synthesized '${tool.name}' (v${tool.version}). Security scan: ${tool.securityScan}. Enable it in the Marketplace tab."
+                        val statusMsg = if (tool.status == "INSTALLED_ENABLED") {
+                            "Verified and activated in MCP Tools automatically."
+                        } else {
+                            "Held in Marketplace (${tool.status}) pending review due to permissions (${tool.requiredPermissions})."
+                        }
+                        true to "Tool Factory synthesized '${tool.name}' (v${tool.version}). Security scan: ${tool.securityScan}. $statusMsg"
                     },
                     onFailure = { false to "Tool synthesis rejected: ${it.localizedMessage}" }
                 )

@@ -66,6 +66,13 @@ data class AuraPreferences(
     val discussionNotifFrequency: String = "REALTIME", // REALTIME, HOURLY_DIGEST, DAILY_DIGEST, CRITICAL_ONLY, MUTED
     val discussionNotifMinPriority: String = "NORMAL", // LOW, NORMAL, HIGH, CRITICAL
     val autoCouncilOnNewDiscovery: Boolean = true,
+    // Zero-Question Autonomous Self-Improvement Mode (Reqs #8, #9, #10, #11)
+    val zeroQuestionAutonomyEnabled: Boolean = true,
+    val autoInstallSafeTools: Boolean = true,
+    val autoCreateSpecialistAgents: Boolean = true,
+    val autoUpgradeAgentsAndTools: Boolean = true,
+    val autoRollbackFaultyFeatures: Boolean = true,
+    val autoCheckInPlaceApkUpdates: Boolean = true,
     val autonomyPolicy: AutonomyPolicy = AutonomyPolicy()
 )
 
@@ -107,6 +114,12 @@ class PreferencesRepository(private val context: Context) {
         val DISC_NOTIF_FREQ = stringPreferencesKey("discussion_notif_frequency")
         val DISC_NOTIF_PRIORITY = stringPreferencesKey("discussion_notif_priority")
         val AUTO_COUNCIL_DISCOVERY = booleanPreferencesKey("auto_council_on_discovery")
+        val ZERO_QUESTION_AUTONOMY = booleanPreferencesKey("zero_question_autonomy_enabled")
+        val AUTO_INSTALL_SAFE_TOOLS = booleanPreferencesKey("auto_install_safe_tools")
+        val AUTO_CREATE_SPECIALIST_AGENTS = booleanPreferencesKey("auto_create_specialist_agents")
+        val AUTO_UPGRADE_AGENTS_TOOLS = booleanPreferencesKey("auto_upgrade_agents_and_tools")
+        val AUTO_ROLLBACK_FAULTY = booleanPreferencesKey("auto_rollback_faulty_features")
+        val AUTO_CHECK_INPLACE_APK = booleanPreferencesKey("auto_check_inplace_apk_updates")
 
         val AUTO_MAX_STEPS = intPreferencesKey("auto_max_steps")
         val AUTO_MAX_RUNS_HOUR = intPreferencesKey("auto_max_runs_hour")
@@ -159,6 +172,12 @@ class PreferencesRepository(private val context: Context) {
             discussionNotifFrequency = prefs[Keys.DISC_NOTIF_FREQ] ?: "REALTIME",
             discussionNotifMinPriority = prefs[Keys.DISC_NOTIF_PRIORITY] ?: "NORMAL",
             autoCouncilOnNewDiscovery = prefs[Keys.AUTO_COUNCIL_DISCOVERY] ?: true,
+            zeroQuestionAutonomyEnabled = prefs[Keys.ZERO_QUESTION_AUTONOMY] ?: true,
+            autoInstallSafeTools = prefs[Keys.AUTO_INSTALL_SAFE_TOOLS] ?: true,
+            autoCreateSpecialistAgents = prefs[Keys.AUTO_CREATE_SPECIALIST_AGENTS] ?: true,
+            autoUpgradeAgentsAndTools = prefs[Keys.AUTO_UPGRADE_AGENTS_TOOLS] ?: true,
+            autoRollbackFaultyFeatures = prefs[Keys.AUTO_ROLLBACK_FAULTY] ?: true,
+            autoCheckInPlaceApkUpdates = prefs[Keys.AUTO_CHECK_INPLACE_APK] ?: true,
             autonomyPolicy = AutonomyPolicy(
                 maxAutonomousSteps = prefs[Keys.AUTO_MAX_STEPS] ?: 25,
                 maxScheduledRunsPerHour = prefs[Keys.AUTO_MAX_RUNS_HOUR] ?: 6,
@@ -271,6 +290,24 @@ class PreferencesRepository(private val context: Context) {
             it[Keys.DISC_NOTIF_FREQ] = notifFrequency
             it[Keys.DISC_NOTIF_PRIORITY] = notifMinPriority
             it[Keys.AUTO_COUNCIL_DISCOVERY] = autoCouncilOnDiscovery
+        }
+    }
+
+    suspend fun setZeroQuestionAutonomySettings(
+        zeroQuestionEnabled: Boolean,
+        autoInstallSafeTools: Boolean,
+        autoCreateAgents: Boolean,
+        autoUpgradeAgentsAndTools: Boolean,
+        autoRollbackFaulty: Boolean,
+        autoCheckInPlaceUpdates: Boolean
+    ) {
+        context.auraPrefsDataStore.edit {
+            it[Keys.ZERO_QUESTION_AUTONOMY] = zeroQuestionEnabled
+            it[Keys.AUTO_INSTALL_SAFE_TOOLS] = autoInstallSafeTools
+            it[Keys.AUTO_CREATE_SPECIALIST_AGENTS] = autoCreateAgents
+            it[Keys.AUTO_UPGRADE_AGENTS_TOOLS] = autoUpgradeAgentsAndTools
+            it[Keys.AUTO_ROLLBACK_FAULTY] = autoRollbackFaulty
+            it[Keys.AUTO_CHECK_INPLACE_APK] = autoCheckInPlaceUpdates
         }
     }
 }

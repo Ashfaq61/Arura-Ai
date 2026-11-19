@@ -337,10 +337,14 @@ private fun SelfEvolutionTab(viewModel: AuraViewModel) {
                             .fillMaxWidth()
                             .testTag("run_evolution_cycle_btn")
                     ) {
-                        Text("Run 14-Stage Self-Evolution Cycle")
+                        Text("Run Autonomous Self-Improvement Cycle")
                     }
                 }
             }
+        }
+
+        item {
+            ZeroQuestionAutonomySection(viewModel)
         }
 
         item {
