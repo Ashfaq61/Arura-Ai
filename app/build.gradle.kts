@@ -16,7 +16,7 @@ android {
     applicationId = "com.aistudio.auraai.xkmqzp"
     minSdk = 24
     targetSdk = 36
-    val runNumber = (System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 1).coerceAtLeast(1)
+    val runNumber = (System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 16).coerceAtLeast(16)
     versionCode = runNumber
     versionName = "1.0.$runNumber"
 

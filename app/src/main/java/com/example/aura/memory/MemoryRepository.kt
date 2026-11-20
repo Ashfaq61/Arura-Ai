@@ -59,6 +59,7 @@ class MemoryRepository(private val db: AuraDatabase) {
     suspend fun deleteTool(id: String) = db.marketplaceDao().deleteTool(id)
 
     suspend fun upsertResearchProjects(projects: List<ResearchProjectEntity>) = db.researchDao().upsertProjects(projects)
+    suspend fun getAllResearchProjectsOnce(): List<ResearchProjectEntity> = db.researchDao().observeProjects().first()
     suspend fun insertEvolutionCycle(cycle: EvolutionCycleEntity): Long = db.evolutionDao().insertCycle(cycle)
     suspend fun updateEvolutionCycle(cycle: EvolutionCycleEntity) = db.evolutionDao().updateCycle(cycle)
     suspend fun recordUsage(usage: ProviderUsageEntity) = db.usageDao().insertUsage(usage)

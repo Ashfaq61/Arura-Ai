@@ -309,6 +309,161 @@ class GitHubSelfUpdateClient(
         }
     }
 
+    suspend fun createPullRequest(
+        config: GitHubConfig,
+        title: String,
+        body: String,
+        headBranch: String = config.effectivePushBranch,
+        baseBranch: String = "main"
+    ): Result<GitHubPullRequestInfo> = withContext(Dispatchers.IO) {
+        val cleanHead = headBranch.trim()
+        if (cleanHead.isBlank() || cleanHead.equals(baseBranch, ignoreCase = true)) {
+            return@withContext Result.failure(GitHubApiException(400, "Head branch '$cleanHead' must differ from '$baseBranch'."))
+        }
+        if (config.token.isBlank()) {
+            return@withContext Result.failure(GitHubApiException(401, "Missing GitHub PAT token."))
+        }
+        val url = apiUrl("repos", config.owner.trim(), config.repo.trim(), "pulls")
+            ?: return@withContext Result.failure(GitHubApiException(null, "Invalid pulls URL."))
+
+        val payload = JSONObject().apply {
+            put("title", title.ifBlank { "AURA AI Autonomous Update ($cleanHead)" })
+            put("head", cleanHead)
+            put("base", baseBranch.ifBlank { "main" })
+            put("body", body)
+        }
+        val req = baseRequestBuilder(url, config.token)
+            .post(payload.toString().toRequestBody(JSON_MEDIA))
+            .build()
+
+        executeSafe {
+            executeFollowingSafeRedirects(req, config.token).use { resp ->
+                val raw = resp.body?.string().orEmpty()
+                if (!resp.isSuccessful) {
+                    throw GitHubApiException(resp.code, mapHttpError(resp.code, extractMessage(raw), resp))
+                }
+                val json = JSONObject(raw)
+                GitHubPullRequestInfo(
+                    number = json.optInt("number"),
+                    title = json.optString("title"),
+                    state = json.optString("state", "open"),
+                    headBranch = json.optJSONObject("head")?.optString("ref", cleanHead) ?: cleanHead,
+                    baseBranch = json.optJSONObject("base")?.optString("ref", baseBranch) ?: baseBranch,
+                    htmlUrl = json.optString("html_url"),
+                    createdAt = json.optString("created_at")
+                )
+            }
+        }
+    }
+
+    suspend fun listOpenPullRequests(config: GitHubConfig): Result<List<GitHubPullRequestInfo>> =
+        withContext(Dispatchers.IO) {
+            val parsedBase = baseUrl.toHttpUrlOrNull()
+                ?: return@withContext Result.failure(GitHubApiException(null, "Invalid GitHub URL."))
+            val url = parsedBase.newBuilder()
+                .addPathSegment("repos")
+                .addPathSegment(config.owner.trim())
+                .addPathSegment(config.repo.trim())
+                .addPathSegment("pulls")
+                .addQueryParameter("state", "open")
+                .addQueryParameter("per_page", "15")
+                .build()
+            val req = baseRequestBuilder(url, config.token).get().build()
+            executeSafe {
+                executeFollowingSafeRedirects(req, config.token).use { resp ->
+                    val raw = resp.body?.string().orEmpty()
+                    if (!resp.isSuccessful) {
+                        throw GitHubApiException(resp.code, mapHttpError(resp.code, extractMessage(raw), resp))
+                    }
+                    val arr = JSONArray(raw)
+                    (0 until arr.length()).map { i ->
+                        val json = arr.getJSONObject(i)
+                        GitHubPullRequestInfo(
+                            number = json.optInt("number"),
+                            title = json.optString("title"),
+                            state = json.optString("state", "open"),
+                            headBranch = json.optJSONObject("head")?.optString("ref").orEmpty(),
+                            baseBranch = json.optJSONObject("base")?.optString("ref").orEmpty(),
+                            htmlUrl = json.optString("html_url"),
+                            createdAt = json.optString("created_at")
+                        )
+                    }
+                }
+            }
+        }
+
+    suspend fun postPullRequestReviewComment(
+        config: GitHubConfig,
+        prNumber: Int,
+        commentBody: String
+    ): Result<String> = withContext(Dispatchers.IO) {
+        val url = apiUrl("repos", config.owner.trim(), config.repo.trim(), "issues", prNumber.toString(), "comments")
+            ?: return@withContext Result.failure(GitHubApiException(null, "Invalid comment URL."))
+        val payload = JSONObject().apply { put("body", commentBody) }
+        val req = baseRequestBuilder(url, config.token)
+            .post(payload.toString().toRequestBody(JSON_MEDIA))
+            .build()
+        executeSafe {
+            executeFollowingSafeRedirects(req, config.token).use { resp ->
+                val raw = resp.body?.string().orEmpty()
+                if (!resp.isSuccessful) {
+                    throw GitHubApiException(resp.code, mapHttpError(resp.code, extractMessage(raw), resp))
+                }
+                JSONObject(raw).optString("html_url", "Comment posted to PR #$prNumber")
+            }
+        }
+    }
+
+    suspend fun triggerWorkflowDispatch(
+        config: GitHubConfig,
+        workflowFile: String = "android-ci.yml",
+        refBranch: String = config.effectivePushBranch
+    ): Result<String> = withContext(Dispatchers.IO) {
+        if (config.token.isBlank()) {
+            return@withContext Result.failure(GitHubApiException(401, "Missing GitHub PAT token."))
+        }
+        val url = apiUrl(
+            "repos",
+            config.owner.trim(),
+            config.repo.trim(),
+            "actions",
+            "workflows",
+            workflowFile,
+            "dispatches"
+        ) ?: return@withContext Result.failure(GitHubApiException(null, "Invalid workflow dispatch URL."))
+        val payload = JSONObject().apply {
+            put("ref", refBranch.trim().ifBlank { DEFAULT_AURA_BRANCH })
+        }
+        val req = baseRequestBuilder(url, config.token)
+            .post(payload.toString().toRequestBody(JSON_MEDIA))
+            .build()
+        executeSafe {
+            executeFollowingSafeRedirects(req, config.token).use { resp ->
+                if (resp.code == 204 || resp.isSuccessful) {
+                    "Dispatched workflow '$workflowFile' on ref '${payload.optString("ref")}'."
+                } else {
+                    val raw = resp.body?.string().orEmpty()
+                    throw GitHubApiException(resp.code, mapHttpError(resp.code, extractMessage(raw), resp))
+                }
+            }
+        }
+    }
+
+    fun generateChangelogMarkdown(
+        branch: String,
+        featureTitle: String,
+        pushedFiles: List<String>,
+        testSummary: String
+    ): String {
+        return buildString {
+            appendLine("## AURA Autonomous Change Summary ($branch)")
+            appendLine("- **Feature / Fix:** $featureTitle")
+            appendLine("- **Tests:** ${testSummary.ifBlank { "Mandatory Gradle unit tests pending" }}")
+            appendLine("- **Modified Paths (${pushedFiles.size}):**")
+            pushedFiles.forEach { appendLine("  - `$it`") }
+        }.trim()
+    }
+
     suspend fun fetchLatestWorkflowRun(
         config: GitHubConfig,
         branch: String = config.effectivePushBranch
@@ -513,13 +668,44 @@ class GitHubSelfUpdateClient(
         }
     }
 
+    suspend fun fetchReleaseSha256(
+        config: GitHubConfig,
+        asset: GitHubReleaseAsset
+    ): Result<String> = withContext(Dispatchers.IO) {
+        val url = (asset.apiAssetUrl.ifBlank { asset.browserDownloadUrl }).toHttpUrlOrNull()
+            ?: return@withContext Result.failure(GitHubApiException(null, "Invalid SHA-256 asset URL."))
+        val req = Request.Builder()
+            .url(url)
+            .apply {
+                if (config.token.isNotBlank()) {
+                    addHeader("Authorization", "Bearer ${config.token.trim()}")
+                }
+            }
+            .addHeader("Accept", "application/octet-stream")
+            .addHeader("X-GitHub-Api-Version", API_VERSION)
+            .get()
+            .build()
+        executeSafe {
+            executeFollowingSafeRedirects(req, config.token, acceptHeader = "application/octet-stream").use { resp ->
+                if (!resp.isSuccessful) {
+                    val raw = resp.body?.string().orEmpty()
+                    throw GitHubApiException(resp.code, mapHttpError(resp.code, extractMessage(raw), resp))
+                }
+                val raw = resp.body?.string().orEmpty()
+                Regex("""\b([A-Fa-f0-9]{64})\b""").find(raw)?.groupValues?.get(1)?.lowercase()
+                    ?: throw GitHubApiException(422, "SHA-256 asset did not contain a valid 64-hex digest.")
+            }
+        }
+    }
+
     private fun parseReleaseJson(obj: JSONObject): GitHubReleaseInfo {
         val assets = obj.optJSONArray("assets") ?: JSONArray()
         var apkAsset: GitHubReleaseAsset? = null
+        var shaAsset: GitHubReleaseAsset? = null
         for (i in 0 until assets.length()) {
             val a = assets.optJSONObject(i) ?: continue
             val name = a.optString("name")
-            if (name.endsWith(".apk", ignoreCase = true)) {
+            if (name.endsWith(".apk", ignoreCase = true) && apkAsset == null) {
                 apkAsset = GitHubReleaseAsset(
                     id = a.optLong("id", 0L),
                     name = name,
@@ -527,16 +713,27 @@ class GitHubSelfUpdateClient(
                     browserDownloadUrl = a.optString("browser_download_url"),
                     sizeBytes = a.optLong("size", 0L)
                 )
-                break
+            } else if ((name.endsWith(".sha256", ignoreCase = true) || name.endsWith(".sha256sum", ignoreCase = true)) && shaAsset == null) {
+                shaAsset = GitHubReleaseAsset(
+                    id = a.optLong("id", 0L),
+                    name = name,
+                    apiAssetUrl = a.optString("url").ifBlank { a.optString("browser_download_url") },
+                    browserDownloadUrl = a.optString("browser_download_url"),
+                    sizeBytes = a.optLong("size", 0L)
+                )
             }
         }
+        val bodyText = obj.optString("body")
+        val bodySha = Regex("""\b([A-Fa-f0-9]{64})\b""").find(bodyText)?.groupValues?.get(1)?.lowercase()
         return GitHubReleaseInfo(
             tagName = obj.optString("tag_name"),
             name = obj.optString("name").ifBlank { obj.optString("tag_name") },
-            body = obj.optString("body"),
+            body = bodyText,
             htmlUrl = obj.optString("html_url"),
             apkAsset = apkAsset,
-            publishedAt = obj.optString("published_at")
+            publishedAt = obj.optString("published_at"),
+            sha256Asset = shaAsset,
+            expectedSha256 = bodySha
         )
     }
 

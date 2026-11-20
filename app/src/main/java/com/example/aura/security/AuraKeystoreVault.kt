@@ -85,11 +85,11 @@ class AuraKeystoreVault(context: Context) {
         return decryptString(encrypted)
     }
 
-    fun getActiveSlotForProvider(providerId: String): Pair<ApiKeySlot, String>? {
+    fun getActiveSlotForProvider(providerId: String, allowEmptyKey: Boolean = false): Pair<ApiKeySlot, String>? {
         val slots = loadAllSlotsMetadata().filter { it.providerId == providerId && it.isEnabled }
         for (slot in slots) {
-            val key = getDecryptedKey(slot.id)
-            if (!key.isNullOrBlank()) {
+            val key = getDecryptedKey(slot.id).orEmpty()
+            if (key.isNotBlank() || allowEmptyKey) {
                 return slot to key
             }
         }

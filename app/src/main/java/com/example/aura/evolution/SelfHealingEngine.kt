@@ -143,6 +143,32 @@ class SelfHealingEngine(private val context: Context) {
         return "Pruned ${freedKb}KB temporary cache safely."
     }
 
+    /**
+     * Post-install / startup self-healing check: verifies DB and Keystore accessibility
+     * and detects recurring crashes without ever wiping user records.
+     */
+    fun diagnoseStartupHealth(
+        dbReadable: Boolean,
+        keystoreReadable: Boolean,
+        unresolvedCrashCount: Int
+    ): Pair<Boolean, String> {
+        val healthy = dbReadable && keystoreReadable && unresolvedCrashCount == 0
+        val note = when {
+            !dbReadable -> "Room DB read issue detected — entered read-safe recovery (user data preserved)."
+            !keystoreReadable -> "Android Keystore unlock warning — re-authenticate API vault if needed."
+            unresolvedCrashCount > 0 -> "Detected $unresolvedCrashCount pending crash report(s); auto-diagnostics logged recovery candidate."
+            else -> "Startup integrity verified (Room DB + Keystore readable, 0 unresolved crashes)."
+        }
+        recordEvent(
+            category = if (healthy) FailureCategory.BUILD_OR_DEP_CONFLICT else FailureCategory.CRASH,
+            action = "startup_integrity_check",
+            strategy = note,
+            succeeded = dbReadable && keystoreReadable
+        )
+        if (unresolvedCrashCount > 0) _recentCrashCount.value += unresolvedCrashCount
+        return healthy to note
+    }
+
     fun recordEvent(category: FailureCategory, action: String, strategy: String, succeeded: Boolean) {
         _healingHistory.value = (listOf(HealingEvent(category, action, strategy, succeeded)) + _healingHistory.value).take(60)
     }

@@ -3,6 +3,7 @@ package com.example.aura.evolution
 import android.content.Context
 import com.example.aura.agents.AgentNetworkManager
 import com.example.aura.agents.AgentStatus
+import com.example.aura.agents.McpRuntimeEngine
 import com.example.aura.agents.McpToolDescriptor
 import com.example.aura.ai.GEMINI_DEFAULT_MODEL
 import com.example.aura.automation.DeviceControlEngine
@@ -12,8 +13,13 @@ import com.example.aura.github.ApkVersionComparator
 import com.example.aura.github.GitHubConfig
 import com.example.aura.github.GitHubReleasePair
 import com.example.aura.github.GitHubSelfUpdateClient
+import com.example.aura.github.GitHubSetupDiagnostics
 import com.example.aura.history.AgentHistoryRecorder
+import com.example.aura.history.BacklogPriorityInput
+import com.example.aura.history.BacklogPriorityScore
+import com.example.aura.history.BacklogPriorityScorer
 import com.example.aura.history.FeatureControlPipelineEngine
+import com.example.aura.history.FeatureLifecycleStage
 import com.example.aura.history.QaExchangeTurn
 import com.example.aura.memory.AgentHistoryRepository
 import com.example.aura.memory.AuraPreferences
@@ -84,6 +90,9 @@ class ContinuousSelfImprovementEngine(
     private val _lastReport = MutableStateFlow<AutonomousCycleReport?>(null)
     val lastReport: StateFlow<AutonomousCycleReport?> = _lastReport.asStateFlow()
 
+    private val _prioritizedBacklog = MutableStateFlow<List<BacklogPriorityScore>>(emptyList())
+    val prioritizedBacklog: StateFlow<List<BacklogPriorityScore>> = _prioritizedBacklog.asStateFlow()
+
     suspend fun runAutonomousCycle(
         focusTopic: String = "android ai agent",
         prefs: AuraPreferences = AuraPreferences(),
@@ -125,6 +134,9 @@ class ContinuousSelfImprovementEngine(
         discoveredProjects.take(6).forEach { p ->
             discoveredCandidates += "${p.name} (${p.sourcePlatform}, ${p.license})"
         }
+
+        val rankedBacklog = buildRankedBacklog(discoveredProjects, health.totalRamMb)
+        _prioritizedBacklog.value = rankedBacklog
 
         val selectedApproachReason = selectBestSafeImplementation(
             discoveredProjects = discoveredProjects,
@@ -267,7 +279,7 @@ class ContinuousSelfImprovementEngine(
             val crashedRecently = recentCrashes.any { act ->
                 act.contains(tool.id.lowercase()) || act.contains(tool.name.lowercase())
             }
-            val (healthyNow, healthDetail) = toolFactory.verifyToolHealth(tool)
+            val (healthyNow, healthDetail) = toolFactory.verifyToolHealthAndExecute(tool)
 
             if (isMarkedFaulty || crashedRecently || (tool.status == "INSTALLED_ENABLED" && !healthyNow)) {
                 val (safeSpec, scanMsg) = permissionGuard.scanToolSpecForSafety(
@@ -275,21 +287,60 @@ class ContinuousSelfImprovementEngine(
                     codeOrSpec = tool.description,
                     permissions = tool.requiredPermissions.split(",").map { it.trim() }
                 )
-                // Attempt automated schema repair if spec itself is safe and tool was corrupt JSON
+                // Attempt automated executable schema repair ONLY if tool spec itself is safe
                 if (safeSpec && !healthyNow && tool.description.isNotBlank() && tool.name.isNotBlank()) {
-                    val repairedSlug = "aura_${tool.name.lowercase().replace(Regex("[^a-z0-9]+"), "_").trim('_').take(24).ifBlank { "tool" }}"
+                    val repairedSlug = McpRuntimeEngine.extractMcpSlug(tool)
+                    val op = McpRuntimeEngine.inferOperationFromRequest("${tool.name} ${tool.description}")
+                    val repairedSpec = JSONObject().apply {
+                        put("name", repairedSlug)
+                        put("executionType", "LOCAL_SANDBOX_MCP")
+                        put("operation", op)
+                        put("capabilities", org.json.JSONArray(listOf("runtimeExec", "redactPii", "structuredOutput")))
+                        put("schema", JSONObject("""{"query":"string","dryRun":"boolean"}"""))
+                        put("testPayload", "Auto-repair verification probe for ${tool.name}")
+                        put("redactPii", true)
+                    }.toString()
                     val repairedTool = tool.copy(
-                        mcpSchemaJson = """{"name":"$repairedSlug","schema":{"query":"string","dryRun":"boolean"}}""",
+                        mcpSchemaJson = repairedSpec,
                         status = "INSTALLED_ENABLED",
-                        testResults = "AUTO_REPAIRED: Replaced malformed MCP schema",
+                        testResults = "AUTO_REPAIRED: Restored executable MCP spec",
                         updatedAt = System.currentTimeMillis()
                     )
-                    if (toolFactory.verifyToolHealth(repairedTool).first) {
-                        memoryRepository.upsertTool(repairedTool)
+                    val (repairedOk, repairedDetail) = toolFactory.verifyToolHealthAndExecute(repairedTool)
+                    if (repairedOk) {
+                        val verifiedRepaired = repairedTool.copy(testResults = "AUTO_REPAIRED: $repairedDetail")
+                        memoryRepository.upsertTool(verifiedRepaired)
                         agentNetwork.registerMcpTool(
-                            McpToolDescriptor(repairedSlug, repairedTool.category, repairedTool.description, """{"query":"string"}""", 1, true)
+                            McpToolDescriptor(
+                                name = repairedSlug,
+                                category = verifiedRepaired.category,
+                                description = verifiedRepaired.description,
+                                inputSchemaJson = McpRuntimeEngine.extractSchemaString(verifiedRepaired),
+                                safetyLevel = McpRuntimeEngine.inferSafetyLevel(verifiedRepaired.requiredPermissions),
+                                enabled = true
+                            )
                         )
-                        memoryRepository.logAudit("Self-Healing Engine", "AUTO_REPAIR:${tool.name}", 2, "ALLOWED", "Repaired malformed schema ($healthDetail)")
+                        historyRepo.recordRegistryEvent(
+                            FeatureRegistryHistoryEntity(
+                                featureId = verifiedRepaired.id,
+                                featureName = verifiedRepaired.name,
+                                description = "Auto-repaired broken MCP specification and verified runtime execution.",
+                                discoverySource = "Continuous Self-Improvement Monitor",
+                                recommendingAgent = "Error Recovery Agent",
+                                participatingAgentsCsv = "Error Recovery Agent, Security Agent, Testing Agent",
+                                discoveredAt = tool.updatedAt,
+                                version = verifiedRepaired.version,
+                                changeEventType = "ACTIVATED",
+                                dependencies = verifiedRepaired.dependencies,
+                                permissionsRequired = verifiedRepaired.requiredPermissions,
+                                installationDate = System.currentTimeMillis(),
+                                testResults = verifiedRepaired.testResults,
+                                activationStatus = "ACTIVE",
+                                decisionReason = "Repaired malformed MCP contract ($healthDetail) and passed live execution test.",
+                                versionDiffSummary = "Repaired MCP spec -> $repairedDetail"
+                            )
+                        )
+                        memoryRepository.logAudit("Self-Healing Engine", "AUTO_REPAIR:${tool.name}", 2, "ALLOWED", "Repaired & verified schema ($repairedDetail)")
                         bugsHandled += "FIXED:${tool.name}"
                         continue
                     }
@@ -299,23 +350,19 @@ class ContinuousSelfImprovementEngine(
                 if (prefs.autoRollbackFaultyFeatures) {
                     val hasPrevious = !tool.previousVersion.isNullOrBlank()
                     val rolledBack = if (hasPrevious) {
-                        tool.copy(
-                            version = tool.previousVersion!!,
-                            status = "INSTALLED_ENABLED",
-                            testResults = "AUTO_ROLLED_BACK from v${tool.version} ($healthDetail)",
-                            updatedAt = System.currentTimeMillis()
-                        )
+                        toolFactory.rollbackTool(tool = tool, reason = healthDetail).copy(
+                            testResults = "AUTO_ROLLED_BACK from v${tool.version} ($healthDetail)"
+                        ).also { memoryRepository.upsertTool(it) }
                     } else {
                         tool.copy(
                             status = "DISABLED_FAULTY",
                             testResults = "AUTO_DISABLED_FAULTY: $healthDetail | $scanMsg",
                             updatedAt = System.currentTimeMillis()
-                        )
-                    }
-                    memoryRepository.upsertTool(rolledBack)
-                    val mcpSlug = runCatching { JSONObject(tool.mcpSchemaJson).optString("name") }.getOrDefault("")
-                    if (mcpSlug.isNotBlank() && !hasPrevious) {
-                        agentNetwork.unregisterMcpTool(mcpSlug)
+                        ).also {
+                            memoryRepository.upsertTool(it)
+                            val mcpSlug = McpRuntimeEngine.extractMcpSlug(tool)
+                            if (mcpSlug.isNotBlank()) agentNetwork.unregisterMcpTool(mcpSlug)
+                        }
                     }
                     historyRepo.recordRegistryEvent(
                         FeatureRegistryHistoryEntity(
@@ -328,35 +375,43 @@ class ContinuousSelfImprovementEngine(
                             discoveredAt = tool.updatedAt,
                             version = rolledBack.version,
                             previousVersion = tool.version,
-                            changeEventType = "ROLLED_BACK",
+                            changeEventType = if (hasPrevious) "ROLLED_BACK" else "DISABLED",
                             dependencies = tool.dependencies,
                             permissionsRequired = tool.requiredPermissions,
                             testResults = rolledBack.testResults,
                             activationStatus = if (hasPrevious) "ROLLED_BACK" else "DISABLED",
                             decisionReason = "Automatic recovery prevented faulty tool from affecting healthy modules.",
-                            versionDiffSummary = "Rolled back from v${tool.version} to ${rolledBack.version}"
+                            versionDiffSummary = if (hasPrevious) "Rolled back from v${tool.version} to ${rolledBack.version}" else "Disabled faulty tool v${tool.version}"
                         )
                     )
                     memoryRepository.logAudit("Self-Upgrade Agent", "AUTO_ROLLBACK:${tool.name}", 3, "ALLOWED", rolledBack.testResults)
-                    bugsHandled += "ROLLED_BACK:${tool.name}"
+                    bugsHandled += if (hasPrevious) "ROLLED_BACK:${tool.name}" else "DISABLED:${tool.name}"
                 }
                 continue
             }
 
             // Auto-verify & activate compatible disabled Marketplace tools when in Zero-Question Mode (#10)
             if (prefs.zeroQuestionAutonomyEnabled && prefs.autoInstallSafeTools && tool.status == "INSTALLED_DISABLED") {
-                if (healthyNow && toolFactory.isLowRiskPermissionSet(tool.requiredPermissions)) {
+                if (!toolFactory.isLowRiskPermissionSet(tool.requiredPermissions)) {
+                    pendingApprovals += "${tool.name} (requires sensitive permission: ${tool.requiredPermissions})"
+                    blockers += "Tool '${tool.name}' gated on sensitive permission (${tool.requiredPermissions}); awaiting user approval."
+                } else if (healthyNow) {
                     val activeTool = tool.copy(
                         status = "INSTALLED_ENABLED",
                         testResults = "AUTO_VERIFIED: $healthDetail",
                         updatedAt = System.currentTimeMillis()
                     )
                     memoryRepository.upsertTool(activeTool)
-                    val mcpName = runCatching { JSONObject(activeTool.mcpSchemaJson).optString("name") }
-                        .getOrDefault("mkt_${activeTool.id.lowercase()}")
-                        .ifBlank { "mkt_${activeTool.id.lowercase()}" }
+                    val mcpName = McpRuntimeEngine.extractMcpSlug(activeTool)
                     agentNetwork.registerMcpTool(
-                        McpToolDescriptor(mcpName, activeTool.category, activeTool.description, "{}", 1, enabled = true)
+                        McpToolDescriptor(
+                            name = mcpName,
+                            category = activeTool.category,
+                            description = activeTool.description,
+                            inputSchemaJson = McpRuntimeEngine.extractSchemaString(activeTool),
+                            safetyLevel = 1,
+                            enabled = true
+                        )
                     )
                     historyRepo.recordRegistryEvent(
                         FeatureRegistryHistoryEntity(
@@ -374,14 +429,32 @@ class ContinuousSelfImprovementEngine(
                             installationDate = System.currentTimeMillis(),
                             testResults = activeTool.testResults,
                             activationStatus = "ACTIVE",
-                            decisionReason = "Low-risk verified Marketplace tool activated automatically without interrupting user.",
+                            decisionReason = "Low-risk verified Marketplace tool passed runtime execution check and was activated.",
                             versionDiffSummary = "Activated v${activeTool.version} in MCP tools"
                         )
                     )
                     toolsInstalled += activeTool.name
-                } else if (!toolFactory.isLowRiskPermissionSet(tool.requiredPermissions)) {
-                    pendingApprovals += "${tool.name} (requires sensitive permission: ${tool.requiredPermissions})"
-                    blockers += "Tool '${tool.name}' gated on sensitive permission (${tool.requiredPermissions}); awaiting user approval."
+                } else {
+                    historyRepo.recordRegistryEvent(
+                        FeatureRegistryHistoryEntity(
+                            featureId = tool.id,
+                            featureName = tool.name,
+                            description = tool.description,
+                            discoverySource = "Marketplace Auto-Install",
+                            recommendingAgent = "Testing Agent",
+                            participatingAgentsCsv = "Marketplace Manager Agent, Testing Agent",
+                            discoveredAt = System.currentTimeMillis(),
+                            version = tool.version,
+                            changeEventType = "FAILED",
+                            dependencies = tool.dependencies,
+                            permissionsRequired = tool.requiredPermissions,
+                            testResults = "FAILED: $healthDetail",
+                            activationStatus = "FAILED",
+                            decisionReason = "Marketplace tool failed runtime verification; kept disabled.",
+                            versionDiffSummary = "v${tool.version} verification failed"
+                        )
+                    )
+                    blockers += "Marketplace tool '${tool.name}' failed verification ($healthDetail) and was NOT activated."
                 }
             }
         }
@@ -402,13 +475,97 @@ class ContinuousSelfImprovementEngine(
             blockers += "External APIs paused by privacy/local policy; continued with local improvements."
             return emptyList()
         }
-        val gh = researchClient.searchGitHubProjects(focusTopic, ramMb).getOrDefault(emptyList())
-        val hf = researchClient.searchHuggingFaceModels("gemma qwen voice", ramMb).getOrDefault(emptyList())
-        val combined = (gh.take(3) + hf.take(3))
-        if (combined.isNotEmpty()) {
-            memoryRepository.upsertResearchProjects(combined)
+        val ghRes = researchClient.searchGitHubProjects(focusTopic, ramMb)
+        ghRes.onFailure { err ->
+            blockers += "GitHub discovery blocker: ${err.localizedMessage ?: "HTTP/network error"}"
         }
-        return combined
+        val hfRes = researchClient.searchHuggingFaceModels("gemma qwen voice", ramMb)
+        hfRes.onFailure { err ->
+            blockers += "Hugging Face discovery blocker: ${err.localizedMessage ?: "HTTP/network error"}"
+        }
+        val mcpRes = researchClient.searchMcpAndA2aDirectories(ramMb)
+        val rawCombined = ghRes.getOrDefault(emptyList()).take(4) +
+            hfRes.getOrDefault(emptyList()).take(4) +
+            mcpRes.getOrDefault(emptyList()).take(2)
+        val deduped = researchClient.deduplicateAndCompareVersions(
+            candidates = rawCombined,
+            existingProjects = memoryRepository.getAllResearchProjectsOnce(),
+            existingTools = memoryRepository.getAllToolsOnce()
+        )
+        val filtered = deduped.filter { !it.isDuplicate || it.hasNewerRelease }.map { it.candidate }
+            .ifEmpty { rawCombined }
+        val evaluated = filtered.map { proj -> evaluateDiscoveredProject(proj, ramMb) }
+        if (evaluated.isNotEmpty()) {
+            memoryRepository.upsertResearchProjects(evaluated)
+        }
+        return evaluated
+    }
+
+    fun buildRankedBacklog(
+        projects: List<ResearchProjectEntity>,
+        ramMb: Long
+    ): List<BacklogPriorityScore> {
+        val inputs = projects.map { proj ->
+            val blocked = proj.installationStatus == "BLOCKED" || proj.license.contains("GPL", true)
+            val isPermissive = proj.license in listOf("MIT", "Apache-2.0", "BSD-3-Clause", "BSD-2-Clause")
+            val stage = when {
+                blocked -> FeatureLifecycleStage.BLOCKED
+                proj.installationStatus == "ADAPTED_TO_MCP" -> FeatureLifecycleStage.ACTIVE
+                proj.installationStatus == "SAFE_FOR_MCP" -> FeatureLifecycleStage.READY
+                proj.testStatus == "FAILED" -> FeatureLifecycleStage.FAILED
+                else -> FeatureLifecycleStage.RESEARCHING
+            }
+            BacklogPriorityInput(
+                featureId = proj.id,
+                featureName = proj.name,
+                sourcePlatform = proj.sourcePlatform,
+                userBenefit = if (proj.sourcePlatform in listOf("MCP_DIRECTORY", "GITHUB")) 8 else 7,
+                security = if (blocked) 2 else if (isPermissive) 9 else 6,
+                reliability = if (proj.testStatus == "PASSED") 8 else 5,
+                compatibility = if (ramMb >= 3500 || !proj.compatibility.contains("exceeds", true)) 9 else 4,
+                performance = if (proj.compatibility.contains("lightweight", true) || proj.resourceEstimate.contains("Low", true)) 8 else 6,
+                cost = if (proj.resourceEstimate.contains("Cloud", true)) 5 else 2,
+                effort = if (proj.sourcePlatform == "HUGGING_FACE") 4 else 3,
+                isBlocked = blocked,
+                blockReason = if (blocked) proj.securityAssessment else "",
+                stage = stage
+            )
+        }
+        return BacklogPriorityScorer.rankBacklog(inputs)
+    }
+
+    private fun evaluateDiscoveredProject(
+        project: ResearchProjectEntity,
+        deviceRamMb: Long
+    ): ResearchProjectEntity {
+        val (safeText, scanMsg) = permissionGuard.scanToolSpecForSafety(
+            name = project.name,
+            codeOrSpec = "${project.description} ${project.compatibility} ${project.dependencies}",
+            permissions = listOf("INTERNET")
+        )
+        val isCopyleft = project.license.contains("GPL", ignoreCase = true) ||
+            project.license.contains("AGPL", ignoreCase = true)
+        val isPermissive = project.license in listOf("MIT", "Apache-2.0", "BSD-3-Clause", "BSD-2-Clause")
+        val fitsOnDevice = deviceRamMb >= 3000 || !project.compatibility.contains("exceeds", ignoreCase = true)
+
+        val status = when {
+            !safeText -> "BLOCKED"
+            isCopyleft -> "BLOCKED"
+            isPermissive && fitsOnDevice -> "SAFE_FOR_MCP"
+            else -> "EVALUATED"
+        }
+        val testStatus = if (safeText && !isCopyleft) "PASSED" else "FAILED"
+        val verdictNote = buildString {
+            append(project.securityAssessment)
+            append(" | Verdict: $status (scan=$scanMsg")
+            if (isCopyleft) append(", blocked GPL/AGPL license")
+            append(", ramMb=$deviceRamMb)")
+        }
+        return project.copy(
+            securityAssessment = verdictNote,
+            installationStatus = status,
+            testStatus = testStatus
+        )
     }
 
     private fun selectBestSafeImplementation(
@@ -416,10 +573,11 @@ class ContinuousSelfImprovementEngine(
         healthRamMb: Long
     ): String {
         val safeCandidate = discoveredProjects.firstOrNull {
-            !it.license.contains("GPL", true) && !it.securityAssessment.contains("BLOCKED", true)
+            it.installationStatus == "SAFE_FOR_MCP" ||
+                (!it.license.contains("GPL", true) && !it.securityAssessment.contains("BLOCKED", true) && it.testStatus == "PASSED")
         }
         return if (safeCandidate != null) {
-            "Selected safest Android-compatible strategy inspired by '${safeCandidate.name}' (${safeCandidate.sourcePlatform}, ${safeCandidate.license}, device ${healthRamMb}MB RAM): adapt as declarative sandboxed MCP capability without dynamic binary execution."
+            "Selected safest Android-compatible strategy inspired by '${safeCandidate.name}' (${safeCandidate.sourcePlatform}, ${safeCandidate.license}, ${safeCandidate.testStatus}, device ${healthRamMb}MB RAM): adapt as declarative sandboxed MCP capability without dynamic binary execution."
         } else {
             "Selected zero-risk local Kotlin/MCP sandbox improvement tuned for ${healthRamMb}MB RAM with full rollback snapshots."
         }
@@ -436,12 +594,19 @@ class ContinuousSelfImprovementEngine(
     ) {
         val existingTools = memoryRepository.getAllToolsOnce()
 
-        // A) Develop original missing tool OR model-inspired tool if uncovered (#8.2, #8.3, #8.9)
-        val topSafeDiscovery = discoveredProjects.firstOrNull {
-            !it.license.contains("GPL", true) && existingTools.none { t -> t.name.contains(it.name.take(10), true) }
+        // A) Develop tool from safe GitHub/HF discovery OR detect uncovered local capability (#8.2, #8.3, #8.9)
+        val topSafeDiscovery = discoveredProjects.firstOrNull { proj ->
+            proj.testStatus == "PASSED" &&
+                proj.installationStatus != "BLOCKED" &&
+                !proj.license.contains("GPL", true) &&
+                existingTools.none { t -> t.name.contains(proj.name.substringAfterLast('/').take(12), true) }
         }
         val missingConcept = when {
-            topSafeDiscovery != null -> "Model-inspired helper: ${topSafeDiscovery.name.take(28)} (${focusTopic.take(24)})"
+            topSafeDiscovery != null -> {
+                val shortName = topSafeDiscovery.name.substringAfterLast('/').take(24)
+                val platformTag = if (topSafeDiscovery.sourcePlatform == "HUGGING_FACE") "HF" else "GH"
+                "$platformTag Adapter: $shortName (${focusTopic.take(20)})"
+            }
             existingTools.none { it.name.contains("Context Digest", true) } -> "Smart Context Digest & Memory Linker"
             existingTools.none { it.name.contains("Latency Profiler", true) } -> "Autonomous Prompt & Latency Profiler"
             else -> null
@@ -450,17 +615,22 @@ class ContinuousSelfImprovementEngine(
         if (missingConcept != null && prefs.autoInstallSafeTools) {
             val synthesized = toolFactory.synthesizeNewTool(
                 capabilityRequest = missingConcept,
-                category = "Productivity",
+                category = if (topSafeDiscovery?.sourcePlatform == "HUGGING_FACE") "AI Models" else "Productivity",
                 autoActivateIfSafe = true
             )
             synthesized.onSuccess { tool ->
                 if (tool.status == "INSTALLED_ENABLED") {
+                    topSafeDiscovery?.let { disc ->
+                        memoryRepository.upsertResearchProjects(
+                            listOf(disc.copy(installationStatus = "ADAPTED_TO_MCP", testStatus = "PASSED"))
+                        )
+                    }
                     historyRepo.recordRegistryEvent(
                         FeatureRegistryHistoryEntity(
                             featureId = tool.id,
                             featureName = tool.name,
                             description = tool.description,
-                            discoverySource = if (topSafeDiscovery != null) topSafeDiscovery.sourcePlatform else "Autonomous Gap Detection",
+                            discoverySource = topSafeDiscovery?.sourcePlatform ?: "Autonomous Gap Detection",
                             sourceUrl = topSafeDiscovery?.url.orEmpty(),
                             recommendingAgent = "Tool Discovery Agent",
                             participatingAgentsCsv = "Tool Discovery Agent, Tool Factory Agent, Security Agent, Testing Agent",
@@ -472,8 +642,8 @@ class ContinuousSelfImprovementEngine(
                             installationDate = System.currentTimeMillis(),
                             testResults = tool.testResults,
                             activationStatus = "ACTIVE",
-                            decisionReason = "Autonomously synthesized, tested & activated without interrupting user.",
-                            versionDiffSummary = "New v${tool.version} tool synthesized and activated"
+                            decisionReason = "Autonomously synthesized, tested via live runtime execution & activated without interrupting user.",
+                            versionDiffSummary = "New executable v${tool.version} MCP tool synthesized and activated"
                         )
                     )
                     toolsInstalled += tool.name
@@ -482,30 +652,25 @@ class ContinuousSelfImprovementEngine(
                     blockers += "Synthesized '${tool.name}' kept disabled due to permissions (${tool.requiredPermissions})."
                 }
             }.onFailure { err ->
-                blockers += "Skipped unsafe candidate '$missingConcept': ${err.localizedMessage}"
+                blockers += "Skipped unsafe/failed candidate '$missingConcept': ${err.localizedMessage}"
             }
         }
 
-        // B) Upgrade outdated active tool (#8.4, #8.10)
+        // B) Upgrade ONLY tools with genuine capability/runtime improvements pending (no cosmetic version/description bumps!)
         if (prefs.autoUpgradeAgentsAndTools) {
             val upgradeCandidate = existingTools.firstOrNull { t ->
                 t.status == "INSTALLED_ENABLED" &&
                     toolFactory.isLowRiskPermissionSet(t.requiredPermissions) &&
-                    (!t.updateAvailableVersion.isNullOrBlank() || t.version == "1.0.0")
+                    (!t.updateAvailableVersion.isNullOrBlank() || needsExecutableCapabilityUpgrade(t))
             }
             if (upgradeCandidate != null) {
-                val targetVersion = upgradeCandidate.updateAvailableVersion?.takeIf { it.isNotBlank() } ?: "1.1.0"
-                val upgraded = upgradeCandidate.copy(
-                    previousVersion = upgradeCandidate.version,
-                    version = targetVersion,
-                    updateAvailableVersion = null,
-                    description = if (upgradeCandidate.description.contains("Auto-tuned")) upgradeCandidate.description
-                    else "${upgradeCandidate.description} [Auto-tuned schema & diagnostics]",
-                    testResults = "PASSED: Upgraded ${upgradeCandidate.version} -> $targetVersion & regression-verified",
-                    updatedAt = System.currentTimeMillis()
+                val rollbackJson = ToolFactoryAndEvolutionEngine.buildToolRollbackSnapshot(upgradeCandidate)
+                val upgradeRes = toolFactory.upgradeToolWithRealCapabilities(
+                    tool = upgradeCandidate,
+                    upgradeReason = "Upgrade MCP execution schema, PII redaction & structured runtime output",
+                    requestedCapabilities = listOf("redactPii", "structuredOutput", "metrics")
                 )
-                if (toolFactory.verifyToolHealth(upgraded).first) {
-                    memoryRepository.upsertTool(upgraded)
+                upgradeRes.onSuccess { upgraded ->
                     historyRepo.recordRegistryEvent(
                         FeatureRegistryHistoryEntity(
                             featureId = upgraded.id,
@@ -513,7 +678,7 @@ class ContinuousSelfImprovementEngine(
                             description = upgraded.description,
                             discoverySource = "Continuous Self-Improvement Engine",
                             recommendingAgent = "Self-Upgrade Agent",
-                            participatingAgentsCsv = "Self-Upgrade Agent, Performance Optimization Agent, Testing Agent",
+                            participatingAgentsCsv = "Self-Upgrade Agent, Tool Factory Agent, Security Agent, Testing Agent",
                             discoveredAt = System.currentTimeMillis(),
                             version = upgraded.version,
                             previousVersion = upgraded.previousVersion,
@@ -523,14 +688,30 @@ class ContinuousSelfImprovementEngine(
                             installationDate = System.currentTimeMillis(),
                             testResults = upgraded.testResults,
                             activationStatus = "ACTIVE",
-                            decisionReason = "Zero-question minor upgrade passed compatibility & static checks.",
-                            versionDiffSummary = "Upgraded v${upgraded.previousVersion} -> v${upgraded.version}"
+                            decisionReason = "Upgraded executable MCP schema & capabilities; live runtime verification passed.",
+                            versionDiffSummary = "Upgraded v${upgraded.previousVersion} -> v${upgraded.version} (+runtimeExec/redactPii/structuredOutput)",
+                            rollbackSnapshotJson = rollbackJson
                         )
                     )
                     toolsUpgraded += "${upgraded.name} (v${upgraded.previousVersion} -> v${upgraded.version})"
+                }.onFailure { err ->
+                    blockers += "Capability upgrade aborted for '${upgradeCandidate.name}': ${err.localizedMessage}"
                 }
             }
         }
+    }
+
+    private fun needsExecutableCapabilityUpgrade(tool: MarketplaceToolEntity): Boolean {
+        val spec = runCatching { JSONObject(tool.mcpSchemaJson) }.getOrNull() ?: return true
+        val hasExec = spec.optString("executionType") == "LOCAL_SANDBOX_MCP" &&
+            spec.optString("operation").isNotBlank() &&
+            spec.has("testPayload")
+        val capsArr = spec.optJSONArray("capabilities")
+        val hasMetricsAndRedact = if (capsArr != null) {
+            val list = (0 until capsArr.length()).map { capsArr.optString(it) }
+            "redactPii" in list && "structuredOutput" in list && "metrics" in list
+        } else false
+        return !hasExec || !hasMetricsAndRedact
     }
 
     private suspend fun createAndUpgradeSpecialistAgents(
@@ -634,10 +815,17 @@ class ContinuousSelfImprovementEngine(
         if (!prefs.autoCheckInPlaceApkUpdates) {
             return "Skipped (auto in-place APK checks disabled)"
         }
+        val configBlockers = GitHubSetupDiagnostics.inspect(
+            config = gitHubConfig,
+            canRequestPackageInstalls = apkSelfUpdater.canRequestPackageInstalls()
+        )
         if (!gitHubConfig.isConfigured) {
-            val msg = "Missing GitHub owner/repo credentials — native APK build & release update check skipped."
-            blockers += msg
-            return msg
+            configBlockers.filter { it.contains("GitHub") }.forEach { blockers += it }
+            return configBlockers.firstOrNull()
+                ?: "Missing GitHub owner/repo credentials — native APK build & release update check skipped."
+        }
+        if (gitHubConfig.token.isBlank()) {
+            blockers += "Missing GitHub Fine-grained PAT token — code push, CI log fetch, and private release access are blocked (public release check attempted)."
         }
         if (!isOnline) {
             val msg = "Offline — compatible APK release check deferred until internet reconnects."
@@ -683,23 +871,32 @@ class ContinuousSelfImprovementEngine(
         }
 
         val downloadedFile = dlRes.getOrThrow()
-        val pkgVerify = apkSelfUpdater.verifyApkPackageName(downloadedFile)
-        if (pkgVerify.isFailure) {
-            val err = pkgVerify.exceptionOrNull()?.message ?: "Package verification mismatch"
-            blockers += "In-place compatibility blocker: $err"
-            return "Incompatible APK rejected: $err"
+        val expectedSha256 = latest.expectedSha256 ?: latest.sha256Asset?.let { shaAsset ->
+            gitHubClient.fetchReleaseSha256(gitHubConfig, shaAsset).getOrNull()
+        }
+        val integrityVerify = apkSelfUpdater.verifyApkIntegrity(
+            apkFile = downloadedFile,
+            expectedSha256 = expectedSha256,
+            allowDowngradeOrSame = false
+        )
+        if (integrityVerify.isFailure) {
+            val err = integrityVerify.exceptionOrNull()?.message ?: "APK integrity verification failed"
+            runCatching { downloadedFile.delete() }
+            blockers += "APK integrity/compatibility blocker: $err"
+            return "Incompatible or untrusted APK rejected: $err"
         }
 
-        return when (val installOutcome = apkSelfUpdater.installApk(downloadedFile)) {
+        val report = integrityVerify.getOrThrow()
+        return when (val installOutcome = apkSelfUpdater.installApk(downloadedFile, expectedSha256 = expectedSha256)) {
             is ApkInstallResult.SessionStarted -> {
                 memoryRepository.logAudit(
                     "APK Build Agent",
                     "IN_PLACE_UPDATE_INITIATED",
                     3,
                     "ALLOWED",
-                    "Verified matching package (${context.packageName}) & launched in-place installer for ${latest.tagName}"
+                    "Verified pkg=${report.packageName}, vCode=${report.versionCode}, sha256=${report.fileSha256.take(12)}... & launched in-place installer for ${latest.tagName}"
                 )
-                "In-place update initiated for ${latest.tagName} (app data preserved)"
+                "In-place update initiated for ${latest.tagName} (verified SHA-256 & signing identity; app data preserved)"
             }
             is ApkInstallResult.NeedsUnknownSourcesPermission -> {
                 blockers += installOutcome.message

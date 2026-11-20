@@ -39,29 +39,32 @@ jobs:
       - name: Accept Android SDK licenses
         run: yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
 
-      - name: Prepare debug keystore
+      - name: Prepare debug keystore (never overwrite with upload release keystore)
         working-directory: ${{ env.PROJECT_DIR }}
-        env:
-          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
-          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
           mkdir -p ~/.android
-          if [ -n "$KEYSTORE_BASE64" ]; then
-            printf '%s' "$KEYSTORE_BASE64" | tr -d '[:space:]' | base64 -d > ~/.android/debug.keystore
-          elif [ ! -f ~/.android/debug.keystore ]; then
+          if [ ! -f debug.keystore ]; then
             keytool -genkeypair -v \
-              -keystore ~/.android/debug.keystore \
-              -storepass "${KEYSTORE_PASSWORD:-android}" \
-              -alias "${KEY_ALIAS:-androiddebugkey}" \
-              -keypass "${KEY_PASSWORD:-android}" \
+              -keystore debug.keystore \
+              -storepass "android" \
+              -alias "androiddebugkey" \
+              -keypass "android" \
               -keyalg RSA \
               -keysize 2048 \
               -validity 10000 \
               -dname "CN=Android Debug,O=Android,C=US"
           fi
-          cp -f ~/.android/debug.keystore debug.keystore
+
+      - name: Compute monotonic versionCode
+        run: |
+          RAW_RUN="${GITHUB_RUN_NUMBER:-16}"
+          if [ "$RAW_RUN" -lt 16 ]; then
+            EFFECTIVE_RUN=16
+          else
+            EFFECTIVE_RUN="$RAW_RUN"
+          fi
+          echo "EFFECTIVE_RUN_NUMBER=$EFFECTIVE_RUN" >> "$GITHUB_ENV"
+          echo "Effective versionCode=$EFFECTIVE_RUN (versionName=1.0.$EFFECTIVE_RUN)"
 
       - name: Generate Gradle wrapper
         working-directory: ${{ env.PROJECT_DIR }}
@@ -74,9 +77,8 @@ jobs:
         working-directory: ${{ env.PROJECT_DIR }}
         run: chmod +x gradlew
 
-      - name: Run Unit & Robolectric Tests
+      - name: Run Unit & Robolectric Tests (Mandatory Gate)
         working-directory: ${{ env.PROJECT_DIR }}
-        continue-on-error: true
         run: ./gradlew testDebugUnitTest --stacktrace
 
       - name: Run Android Lint
@@ -84,37 +86,116 @@ jobs:
         continue-on-error: true
         run: ./gradlew lintDebug --stacktrace
 
-      - name: Build Debug APK
+      - name: Verify Release Signing Configuration
         working-directory: ${{ env.PROJECT_DIR }}
         env:
-          GITHUB_RUN_NUMBER: ${{ github.run_number }}
-          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-        run: ./gradlew assembleDebug --stacktrace
-
-      - name: Build Release APK
-        working-directory: ${{ env.PROJECT_DIR }}
-        env:
-          GITHUB_RUN_NUMBER: ${{ github.run_number }}
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
-          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-          STORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          SECRET_STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          SECRET_KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
-          if [ -n "$KEYSTORE_BASE64" ] && [ -n "$KEYSTORE_PASSWORD" ] && [ -n "$KEY_ALIAS" ] && [ -n "$KEY_PASSWORD" ]; then
-            echo "$KEYSTORE_BASE64" | base64 -d > my-upload-key.jks
-            ./gradlew assembleRelease --stacktrace
-          else
-            echo "Skipping Release APK build: signing secrets not configured."
+          EFFECTIVE_STORE_PASS="${SECRET_STORE_PASSWORD:-$SECRET_KEYSTORE_PASSWORD}"
+          MISSING=""
+          [ -z "$KEYSTORE_BASE64" ] && MISSING="$MISSING KEYSTORE_BASE64"
+          [ -z "$EFFECTIVE_STORE_PASS" ] && MISSING="$MISSING STORE_PASSWORD/KEYSTORE_PASSWORD"
+          [ -z "$KEY_PASSWORD" ] && MISSING="$MISSING KEY_PASSWORD"
+
+          if [ -n "$MISSING" ]; then
+            echo "BLOCKER: Missing release signing secrets:$MISSING"
+            if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
+              echo "PR event without release signing secrets; skipping signed release build while enforcing mandatory tests."
+              echo "CAN_BUILD_SIGNED_RELEASE=false" >> "$GITHUB_ENV"
+              exit 0
+            else
+              echo "ERROR: Signed release APK requires repository secrets:$MISSING"
+              exit 1
+            fi
+          fi
+          echo "CAN_BUILD_SIGNED_RELEASE=true" >> "$GITHUB_ENV"
+
+      - name: Build Signed Release APK
+        if: env.CAN_BUILD_SIGNED_RELEASE == 'true'
+        working-directory: ${{ env.PROJECT_DIR }}
+        env:
+          GITHUB_RUN_NUMBER: ${{ env.EFFECTIVE_RUN_NUMBER }}
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          SECRET_STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          SECRET_KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          EFFECTIVE_STORE_PASS="${SECRET_STORE_PASSWORD:-$SECRET_KEYSTORE_PASSWORD}"
+          printf '%s' "$KEYSTORE_BASE64" | tr -d '[:space:]' | base64 -d > my-upload-key.jks
+          export KEYSTORE_PATH="$(pwd)/my-upload-key.jks"
+          export STORE_PASSWORD="$EFFECTIVE_STORE_PASS"
+          export KEY_PASSWORD="$KEY_PASSWORD"
+
+          ./gradlew assembleRelease --stacktrace
+
+          RELEASE_APK=$(find . -path "*/build/outputs/apk/release/*.apk" ! -path "*/debug/*" ! -name "*unsigned*" | head -n 1)
+          if [ -z "$RELEASE_APK" ]; then
+            echo "ERROR: assembleRelease succeeded but no signed release APK was produced."
+            exit 1
+          fi
+          echo "RELEASE_APK=$RELEASE_APK" >> "$GITHUB_ENV"
+
+      - name: Verify Signed Release APK Integrity
+        if: env.CAN_BUILD_SIGNED_RELEASE == 'true'
+        working-directory: ${{ env.PROJECT_DIR }}
+        env:
+          EXPECTED_SIGNING_CERT_SHA256: ${{ secrets.EXPECTED_SIGNING_CERT_SHA256 }}
+        run: |
+          APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name "apksigner" | sort -V | tail -n 1)
+          AAPT2=$(find "$ANDROID_HOME/build-tools" -name "aapt2" | sort -V | tail -n 1)
+          if [ -z "$APKSIGNER" ] || [ -z "$AAPT2" ]; then
+            echo "ERROR: Android build-tools (apksigner / aapt2) not found."
+            exit 1
           fi
 
-      - name: Upload Debug APK Artifact
+          echo "Verifying APK signature..."
+          SIGN_INFO=$("$APKSIGNER" verify --verbose --print-certs "$RELEASE_APK")
+          echo "$SIGN_INFO"
+          if echo "$SIGN_INFO" | grep -qi "CN=Android Debug"; then
+            echo "ERROR: APK is signed with a debug certificate! Refusing to publish debug-signed APK as release."
+            exit 1
+          fi
+          if [ -n "${EXPECTED_SIGNING_CERT_SHA256:-}" ]; then
+            NORMALIZED_EXPECTED=$(printf '%s' "$EXPECTED_SIGNING_CERT_SHA256" | tr -d ':' | tr '[:upper:]' '[:lower:]')
+            if ! echo "$SIGN_INFO" | tr '[:upper:]' '[:lower:]' | grep -q "$NORMALIZED_EXPECTED"; then
+              echo "ERROR: APK signing certificate SHA-256 does not match EXPECTED_SIGNING_CERT_SHA256."
+              exit 1
+            fi
+          fi
+
+          BADGING=$("$AAPT2" dump badging "$RELEASE_APK")
+          echo "$BADGING" | head -n 5
+          PKG_NAME=$(echo "$BADGING" | sed -n "s/.*package: name='\([^']*\)'.*/\1/p" | head -n 1)
+          VER_CODE=$(echo "$BADGING" | sed -n "s/.*versionCode='\([^']*\)'.*/\1/p" | head -n 1)
+
+          if [ "$PKG_NAME" != "com.aistudio.auraai.xkmqzp" ]; then
+            echo "ERROR: Package name mismatch. Expected com.aistudio.auraai.xkmqzp, got $PKG_NAME"
+            exit 1
+          fi
+          if [ "$VER_CODE" != "$EFFECTIVE_RUN_NUMBER" ]; then
+            echo "ERROR: versionCode mismatch. Expected $EFFECTIVE_RUN_NUMBER, got $VER_CODE"
+            exit 1
+          fi
+
+          RELEASE_TAG="v1.0.${EFFECTIVE_RUN_NUMBER}"
+          PUBLISH_APK="aura-ai-${RELEASE_TAG}-release.apk"
+          cp -f "$RELEASE_APK" "$PUBLISH_APK"
+          sha256sum "$PUBLISH_APK" > "${PUBLISH_APK}.sha256"
+          cat "${PUBLISH_APK}.sha256"
+          echo "PUBLISH_APK=$PUBLISH_APK" >> "$GITHUB_ENV"
+          echo "RELEASE_TAG=$RELEASE_TAG" >> "$GITHUB_ENV"
+
+      - name: Upload Signed Release APK Artifact
+        if: env.CAN_BUILD_SIGNED_RELEASE == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: debug-apk
-          path: ${{ env.PROJECT_DIR }}/**/build/outputs/apk/debug/*.apk
+          name: signed-release-apk
+          path: |
+            ${{ env.PROJECT_DIR }}/${{ env.PUBLISH_APK }}
+            ${{ env.PROJECT_DIR }}/${{ env.PUBLISH_APK }}.sha256
           if-no-files-found: error
 
       - name: Upload Test Reports
@@ -126,40 +207,22 @@ jobs:
             ${{ env.PROJECT_DIR }}/**/build/reports
             ${{ env.PROJECT_DIR }}/**/build/test-results
 
-      - name: Publish Signed Self-Update APK Release
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      - name: Publish Signed Self-Update Release APK
+        if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
         working-directory: ${{ env.PROJECT_DIR }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
-          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
-          RELEASE_TAG="v1.0.${{ github.run_number }}"
-          APK_SOURCE=$(find . -path "*/build/outputs/apk/debug/*.apk" ! -name "*unsigned*" | head -n 1)
-          if [ -z "$APK_SOURCE" ]; then
-            echo "ERROR: No debug APK found to publish."
+          if [ ! -f "$PUBLISH_APK" ] || [ ! -f "${PUBLISH_APK}.sha256" ]; then
+            echo "ERROR: Verified signed release APK or SHA-256 checksum missing. Refusing to publish."
             exit 1
           fi
+          SHA256_HEX=$(awk '{print $1}' "${PUBLISH_APK}.sha256")
+          RELEASE_NOTES="Verified signed release APK for Aura AI ${RELEASE_TAG} (package=com.aistudio.auraai.xkmqzp, versionCode=${EFFECTIVE_RUN_NUMBER}, commit=${{ github.sha }}). SHA-256: ${SHA256_HEX}"
 
-          PUBLISH_APK="aura-ai-${RELEASE_TAG}.apk"
-          cp -f "$APK_SOURCE" "$PUBLISH_APK"
-
-          if [ -n "$KEYSTORE_BASE64" ] && [ -f ~/.android/debug.keystore ]; then
-            APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name "apksigner" | sort -V | tail -n 1)
-            if [ -n "$APKSIGNER" ]; then
-              "$APKSIGNER" sign \
-                --ks ~/.android/debug.keystore \
-                --ks-pass "pass:${KEYSTORE_PASSWORD:-android}" \
-                --ks-key-alias "${KEY_ALIAS:-androiddebugkey}" \
-                --key-pass "pass:${KEY_PASSWORD:-android}" \
-                "$PUBLISH_APK"
-            fi
-          fi
-
-          gh release create "$RELEASE_TAG" "$PUBLISH_APK" \
+          gh release create "$RELEASE_TAG" "$PUBLISH_APK" "${PUBLISH_APK}.sha256" \
             --title "Aura AI $RELEASE_TAG" \
-            --notes "Automated Aura AI build #$GITHUB_RUN_NUMBER (versionCode=${{ github.run_number }}, commit=${{ github.sha }})." \
+            --notes "$RELEASE_NOTES" \
             --latest || \
-          gh release upload "$RELEASE_TAG" "$PUBLISH_APK" --clobber
+          gh release upload "$RELEASE_TAG" "$PUBLISH_APK" "${PUBLISH_APK}.sha256" --clobber
+

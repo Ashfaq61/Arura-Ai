@@ -100,7 +100,9 @@ data class GitHubReleaseInfo(
     val body: String,
     val htmlUrl: String,
     val apkAsset: GitHubReleaseAsset?,
-    val publishedAt: String = ""
+    val publishedAt: String = "",
+    val sha256Asset: GitHubReleaseAsset? = null,
+    val expectedSha256: String? = null
 )
 
 data class GitHubReleasePair(
@@ -108,9 +110,29 @@ data class GitHubReleasePair(
     val previous: GitHubReleaseInfo?
 )
 
+data class GitHubPullRequestInfo(
+    val number: Int,
+    val title: String,
+    val state: String,
+    val headBranch: String,
+    val baseBranch: String,
+    val htmlUrl: String,
+    val createdAt: String = ""
+)
+
+data class UpdateHistoryEntry(
+    val fromVersion: String,
+    val toVersion: String,
+    val toVersionCode: Long,
+    val sha256: String,
+    val status: String, // VERIFIED, RECOVERY_CANDIDATE, FAILED, STARTED
+    val timestamp: Long = System.currentTimeMillis(),
+    val notes: String = ""
+)
+
 data class SelfUpdateUiState(
-    val installedVersionName: String = "1.0.1",
-    val installedVersionCode: Long = 1L,
+    val installedVersionName: String = "1.0.16",
+    val installedVersionCode: Long = 16L,
     val lastWorkingVersion: String = "",
     val latestRelease: GitHubReleaseInfo? = null,
     val previousRelease: GitHubReleaseInfo? = null,
@@ -120,8 +142,37 @@ data class SelfUpdateUiState(
     val downloadProgress: Float = 0f,
     val statusMessage: String = "",
     val errorMessage: String? = null,
-    val needsUnknownSourcesPermission: Boolean = false
+    val needsUnknownSourcesPermission: Boolean = false,
+    val setupBlockers: List<String> = emptyList(),
+    val openPullRequests: List<GitHubPullRequestInfo> = emptyList(),
+    val updateHistory: List<UpdateHistoryEntry> = emptyList()
 )
+
+object GitHubSetupDiagnostics {
+    fun inspect(
+        config: GitHubConfig,
+        canRequestPackageInstalls: Boolean,
+        latestRelease: GitHubReleaseInfo? = null
+    ): List<String> {
+        val blockers = mutableListOf<String>()
+        if (config.owner.isBlank()) {
+            blockers += "Missing GitHub repository owner in Settings -> GitHub."
+        }
+        if (config.repo.isBlank()) {
+            blockers += "Missing GitHub repository name in Settings -> GitHub."
+        }
+        if (config.token.isBlank()) {
+            blockers += "Missing GitHub Fine-grained PAT token — code push, CI log fetch, and authenticated release downloads are blocked."
+        }
+        if (!canRequestPackageInstalls) {
+            blockers += "Missing Android REQUEST_INSTALL_PACKAGES ('Allow from this source') permission for in-place APK updates."
+        }
+        if (latestRelease != null && latestRelease.apkAsset == null) {
+            blockers += "Latest GitHub release '${latestRelease.tagName}' has no signed .apk asset attached."
+        }
+        return blockers
+    }
+}
 
 sealed interface PushGuardResult {
     data object Allowed : PushGuardResult

@@ -53,7 +53,8 @@ class MultiProviderRouter(
     private val modelRouter: ModelRoutingEngine = ModelRoutingEngine(),
     private val geminiKeyStore: GeminiKeyStore? = null,
     private val geminiRestClient: GeminiRestClient = GeminiRestClient(),
-    private val preferencesRepository: PreferencesRepository? = null
+    private val preferencesRepository: PreferencesRepository? = null,
+    httpClientOverride: OkHttpClient? = null
 ) {
     private val _lastRoutedProviderInfo = MutableStateFlow("Ready • Privacy & Budget Router Armed")
     val lastRoutedProviderInfo: StateFlow<String> = _lastRoutedProviderInfo.asStateFlow()
@@ -93,7 +94,7 @@ class MultiProviderRouter(
         }
     }
 
-    private val httpClient = OkHttpClient.Builder()
+    private val httpClient = httpClientOverride ?: OkHttpClient.Builder()
         .connectTimeout(20, TimeUnit.SECONDS)
         .readTimeout(45, TimeUnit.SECONDS)
         .writeTimeout(20, TimeUnit.SECONDS)
@@ -330,13 +331,35 @@ class MultiProviderRouter(
             }
         }
 
-        // Third-party REST providers (Groq / OpenRouter / Hugging Face / OpenAI-Compatible)
-        val slotPair = vault.getActiveSlotForProvider(chosenProvider.id)
-        if (slotPair != null) {
-            val (slot, apiKey) = slotPair
-            val endpoint = slot.customBaseUrl.ifBlank { chosenProvider.defaultBaseUrl }
-            val resolvedSlotModel = slot.preferredModel.ifBlank { resolvedModelId }
-            val restResult = callOpenAiCompatible(endpoint, apiKey, resolvedSlotModel, safeSys, safePrompt)
+        // Third-party & protocol providers (Groq / OpenRouter / Claude / Grok / DeepSeek / Qwen / Hugging Face / Ollama / MCP / A2A / OpenAI-Compatible)
+        val slotPair = vault.getActiveSlotForProvider(chosenProvider.id, allowEmptyKey = !chosenProvider.requiresApiKey)
+        if (slotPair != null || !chosenProvider.requiresApiKey) {
+            val endpoint = slotPair?.first?.customBaseUrl?.ifBlank { chosenProvider.defaultBaseUrl }
+                ?: chosenProvider.defaultBaseUrl
+            val apiKey = slotPair?.second.orEmpty()
+            val resolvedSlotModel = slotPair?.first?.preferredModel?.ifBlank { resolvedModelId }
+                ?: resolvedModelId.ifBlank { chosenProvider.defaultModels.first() }
+            if (chosenProvider.requiresApiKey && apiKey.isBlank()) {
+                if (autoFallback && budgetPolicy.intelligenceMode != "LOCAL_ONLY") {
+                    val fb = tryFallbackFirebaseThenOthers(safePrompt, safeSys, imageBitmap, chosenProvider.id)
+                    if (fb != null) {
+                        _lastRoutedProviderInfo.value = "${fb.providerUsed} (${fb.modelUsed}) [Fallback]$redactionNote"
+                        emit(StreamChunk.Delta(fb.text, fb.providerUsed, fb.modelUsed))
+                        emit(StreamChunk.Done(fb))
+                        return@flow
+                    }
+                }
+                emit(StreamChunk.Error("No active API key configured for ${chosenProvider.displayName}."))
+                return@flow
+            }
+            val restResult = dispatchHttpProvider(
+                provider = chosenProvider,
+                endpoint = endpoint,
+                apiKey = apiKey,
+                model = resolvedSlotModel,
+                systemInstruction = safeSys,
+                prompt = safePrompt
+            )
             if (restResult.isSuccess) {
                 val text = restResult.getOrThrow()
                 val latency = System.currentTimeMillis() - start
@@ -482,16 +505,35 @@ class MultiProviderRouter(
                 Result.failure(e)
             }
         }
-        val slot = vault.getActiveSlotForProvider(chosen.id)
-            ?: return Result.failure(IllegalStateException("No API key configured for ${chosen.displayName}"))
-        val endpoint = slot.first.customBaseUrl.ifBlank { chosen.defaultBaseUrl }
-        val resolvedModel = slot.first.preferredModel.ifBlank { targetModelId }
-        _activeModelInUse.value = resolvedModel
-        return callOpenAiCompatible(endpoint, slot.second, resolvedModel, safeSys, safePrompt).map { text ->
-            val latency = System.currentTimeMillis() - start
-            recordUsageSafe(chosen.id, resolvedModel, taskType, latency, text.length / 4, true)
-            AiRouterResult(text, chosen.displayName, resolvedModel, latency, routingNote = decision.reason)
+        val slot = vault.getActiveSlotForProvider(chosen.id, allowEmptyKey = !chosen.requiresApiKey)
+        if (slot == null && chosen.requiresApiKey) {
+            return Result.failure(IllegalStateException("No API key configured for ${chosen.displayName}"))
         }
+        val endpoint = slot?.first?.customBaseUrl?.ifBlank { chosen.defaultBaseUrl } ?: chosen.defaultBaseUrl
+        val resolvedModel = slot?.first?.preferredModel?.ifBlank { targetModelId } ?: targetModelId
+        val apiKey = slot?.second.orEmpty()
+        _activeModelInUse.value = resolvedModel
+        val callRes = dispatchHttpProvider(
+            provider = chosen,
+            endpoint = endpoint,
+            apiKey = apiKey,
+            model = resolvedModel,
+            systemInstruction = safeSys,
+            prompt = safePrompt
+        )
+        return callRes.fold(
+            onSuccess = { text ->
+                val latency = System.currentTimeMillis() - start
+                recordUsageSafe(chosen.id, resolvedModel, taskType, latency, text.length / 4, true)
+                Result.success(AiRouterResult(text, chosen.displayName, resolvedModel, latency, routingNote = decision.reason))
+            },
+            onFailure = { err ->
+                val latency = System.currentTimeMillis() - start
+                recordUsageSafe(chosen.id, resolvedModel, taskType, latency, 0, false, err.message.orEmpty())
+                val fb = tryFallbackProviders(safePrompt, safeSys, chosen.id)
+                if (fb != null) Result.success(fb) else Result.failure(err)
+            }
+        )
     }
 
     suspend fun testProviderConnection(
@@ -539,16 +581,29 @@ class MultiProviderRouter(
                 true to "Offline Deterministic Engine ready (0ms, no network required)."
             }
             else -> {
-                val key = if (slotId != null) vault.getDecryptedKey(slotId)
-                else vault.getActiveSlotForProvider(provider.id)?.second
-                if (key.isNullOrBlank()) {
+                val slotPair = if (slotId != null) {
+                    vault.loadAllSlotsMetadata().firstOrNull { it.id == slotId }?.let { meta ->
+                        meta to vault.getDecryptedKey(slotId).orEmpty()
+                    }
+                } else {
+                    vault.getActiveSlotForProvider(provider.id, allowEmptyKey = !provider.requiresApiKey)
+                }
+                val key = slotPair?.second.orEmpty()
+                if (provider.requiresApiKey && key.isBlank()) {
                     false to "Missing API key for ${provider.displayName}."
                 } else {
-                    val slotMeta = vault.loadAllSlotsMetadata().firstOrNull { it.id == slotId }
+                    val slotMeta = slotPair?.first
                     val url = slotMeta?.customBaseUrl?.ifBlank { provider.defaultBaseUrl } ?: provider.defaultBaseUrl
                     val model = slotMeta?.preferredModel?.ifBlank { provider.defaultModels.first() }
                         ?: provider.defaultModels.first()
-                    val res = callOpenAiCompatible(url, key, model, "You are a connectivity test.", "Reply with OK")
+                    val res = dispatchHttpProvider(
+                        provider = provider,
+                        endpoint = url,
+                        apiKey = key,
+                        model = model,
+                        systemInstruction = "You are a connectivity test.",
+                        prompt = "Reply with OK"
+                    )
                     val ms = System.currentTimeMillis() - start
                     val msg = res.fold(
                         onSuccess = { "Connected (${ms}ms) via $model" },
@@ -559,6 +614,133 @@ class MultiProviderRouter(
                 }
             }
         }
+    }
+
+    /**
+     * Queries a provider's real model/tool listing endpoint (/v1/models, /api/tags, Gemini models, or MCP tools/list).
+     */
+    suspend fun discoverModelsForProvider(
+        provider: AiProviderType,
+        slotId: String? = null
+    ): Result<List<String>> = withContext(Dispatchers.IO) {
+        if (provider == AiProviderType.LOCAL_OFFLINE) {
+            return@withContext Result.success(provider.defaultModels)
+        }
+        if (provider == AiProviderType.FIREBASE_GEMINI) {
+            val key = geminiKeyStore?.getDecryptedKeys()?.firstOrNull()
+                ?: return@withContext Result.failure(IllegalStateException("Save a Gemini API key first."))
+            val req = Request.Builder()
+                .url("${provider.defaultBaseUrl.trimEnd('/')}/v1beta/models?key=$key")
+                .get()
+                .build()
+            return@withContext runCatching {
+                httpClient.newCall(req).execute().use { resp ->
+                    val raw = resp.body?.string().orEmpty()
+                    if (!resp.isSuccessful) error("HTTP ${resp.code}: ${raw.take(140)}")
+                    val arr = JSONObject(raw).optJSONArray("models") ?: JSONArray()
+                    (0 until arr.length()).mapNotNull { i ->
+                        arr.optJSONObject(i)?.optString("name")?.removePrefix("models/")?.takeIf { it.isNotBlank() }
+                    }.distinct().ifEmpty { provider.defaultModels }
+                }
+            }
+        }
+
+        val slotMeta = if (slotId != null) {
+            vault.loadAllSlotsMetadata().firstOrNull { it.id == slotId }
+        } else {
+            vault.loadAllSlotsMetadata().firstOrNull { it.providerId == provider.id && it.isEnabled }
+        }
+        val key = slotMeta?.let { vault.getDecryptedKey(it.id) }.orEmpty()
+        if (provider.requiresApiKey && key.isBlank()) {
+            return@withContext Result.failure(IllegalStateException("Missing API key for ${provider.displayName}."))
+        }
+
+        val baseEndpoint = slotMeta?.customBaseUrl?.ifBlank { provider.defaultBaseUrl } ?: provider.defaultBaseUrl
+        val discoveryUrl = when (provider) {
+            AiProviderType.OLLAMA -> baseEndpoint.substringBefore("/api/") + "/api/tags"
+            AiProviderType.MCP_SERVER -> baseEndpoint
+            AiProviderType.A2A_AGENT -> baseEndpoint.substringBefore("/a2a") + "/.well-known/agent.json"
+            AiProviderType.CLAUDE -> baseEndpoint.substringBefore("/v1/") + "/v1/models"
+            else -> {
+                val prefix = baseEndpoint.substringBefore("/chat/completions").trimEnd('/')
+                "$prefix/models"
+            }
+        }
+
+        runCatching {
+            val builder = Request.Builder().url(discoveryUrl)
+            when (provider) {
+                AiProviderType.MCP_SERVER -> {
+                    val rpc = JSONObject().apply {
+                        put("jsonrpc", "2.0")
+                        put("id", 1)
+                        put("method", "tools/list")
+                        put("params", JSONObject())
+                    }
+                    builder.post(rpc.toString().toRequestBody("application/json".toMediaType()))
+                }
+                AiProviderType.CLAUDE -> {
+                    builder.get()
+                        .addHeader("x-api-key", key)
+                        .addHeader("anthropic-version", ANTHROPIC_API_VERSION)
+                }
+                else -> {
+                    builder.get()
+                    if (key.isNotBlank()) builder.addHeader("Authorization", "Bearer $key")
+                }
+            }
+
+            httpClient.newCall(builder.build()).execute().use { resp ->
+                val raw = resp.body?.string().orEmpty()
+                if (!resp.isSuccessful) error("HTTP ${resp.code}: ${raw.take(140)}")
+                val root = JSONObject(raw)
+                when (provider) {
+                    AiProviderType.OLLAMA -> {
+                        val arr = root.optJSONArray("models") ?: JSONArray()
+                        (0 until arr.length()).mapNotNull { i ->
+                            arr.optJSONObject(i)?.optString("name")?.takeIf { it.isNotBlank() }
+                        }.distinct()
+                    }
+                    AiProviderType.MCP_SERVER -> {
+                        val arr = root.optJSONObject("result")?.optJSONArray("tools") ?: JSONArray()
+                        (0 until arr.length()).mapNotNull { i ->
+                            arr.optJSONObject(i)?.optString("name")?.takeIf { it.isNotBlank() }
+                        }.distinct()
+                    }
+                    AiProviderType.A2A_AGENT -> {
+                        val cardName = root.optString("name").takeIf { it.isNotBlank() }
+                        val skillsArr = root.optJSONArray("skills") ?: JSONArray()
+                        val skillIds = (0 until skillsArr.length()).mapNotNull { i ->
+                            skillsArr.optJSONObject(i)?.optString("name")?.takeIf { it.isNotBlank() }
+                        }
+                        (listOfNotNull(cardName) + skillIds).distinct()
+                    }
+                    else -> {
+                        val arr = root.optJSONArray("data") ?: JSONArray()
+                        (0 until arr.length()).mapNotNull { i ->
+                            arr.optJSONObject(i)?.optString("id")?.takeIf { it.isNotBlank() }
+                        }.distinct()
+                    }
+                }.ifEmpty { provider.defaultModels }
+            }
+        }
+    }
+
+    /**
+     * Lists currently configured external/local providers that hold usable credentials (or need no key).
+     */
+    fun getConfiguredExternalProviders(): List<AiProviderType> {
+        val out = mutableListOf<AiProviderType>()
+        if (geminiKeyStore?.getDecryptedKeys()?.isNotEmpty() == true) {
+            out += AiProviderType.FIREBASE_GEMINI
+        }
+        AiProviderType.entries.forEach { prov ->
+            if (prov != AiProviderType.FIREBASE_GEMINI && prov != AiProviderType.LOCAL_OFFLINE) {
+                val hasSlot = vault.getActiveSlotForProvider(prov.id, allowEmptyKey = !prov.requiresApiKey) != null
+                if (hasSlot) out += prov
+            }
+        }
+        return out.distinct()
     }
 
     private suspend inline fun tryStreamFirebaseGemini(
@@ -611,16 +793,18 @@ class MultiProviderRouter(
         imageBitmap: Bitmap?,
         excludeProvider: String
     ): AiRouterResult? {
-        val geminiRes = generateOnce(
-            prompt = prompt,
-            systemInstruction = systemInstruction,
-            providerId = AiProviderType.FIREBASE_GEMINI.id,
-            modelId = geminiKeyStore?.getSelectedModel() ?: GEMINI_DEFAULT_MODEL,
-            imageBitmap = imageBitmap,
-            taskType = "fallback"
-        )
-        if (geminiRes.isSuccess) {
-            return geminiRes.getOrThrow().copy(usedFallback = true)
+        if (excludeProvider != AiProviderType.FIREBASE_GEMINI.id) {
+            val geminiRes = generateOnce(
+                prompt = prompt,
+                systemInstruction = systemInstruction,
+                providerId = AiProviderType.FIREBASE_GEMINI.id,
+                modelId = geminiKeyStore?.getSelectedModel() ?: GEMINI_DEFAULT_MODEL,
+                imageBitmap = imageBitmap,
+                taskType = "fallback"
+            )
+            if (geminiRes.isSuccess) {
+                return geminiRes.getOrThrow().copy(usedFallback = true)
+            }
         }
         return tryFallbackProviders(prompt, systemInstruction, excludeProvider)
     }
@@ -630,14 +814,23 @@ class MultiProviderRouter(
         systemInstruction: String,
         excludeProvider: String
     ): AiRouterResult? {
-        val candidates = listOf(AiProviderType.GROQ, AiProviderType.OPENROUTER, AiProviderType.HUGGING_FACE, AiProviderType.OPENAI_COMPATIBLE)
-            .filter { it.id != excludeProvider }
+        val candidates = listOf(
+            AiProviderType.GROQ,
+            AiProviderType.OPENROUTER,
+            AiProviderType.CLAUDE,
+            AiProviderType.DEEPSEEK,
+            AiProviderType.GROK,
+            AiProviderType.QWEN,
+            AiProviderType.HUGGING_FACE,
+            AiProviderType.OLLAMA,
+            AiProviderType.OPENAI_COMPATIBLE
+        ).filter { it.id != excludeProvider }
         for (provider in candidates) {
-            val slot = vault.getActiveSlotForProvider(provider.id) ?: continue
+            val slot = vault.getActiveSlotForProvider(provider.id, allowEmptyKey = !provider.requiresApiKey) ?: continue
             val url = slot.first.customBaseUrl.ifBlank { provider.defaultBaseUrl }
             val model = slot.first.preferredModel.ifBlank { provider.defaultModels.first() }
             val start = System.currentTimeMillis()
-            val res = callOpenAiCompatible(url, slot.second, model, systemInstruction, prompt)
+            val res = dispatchHttpProvider(provider, url, slot.second, model, systemInstruction, prompt)
             if (res.isSuccess) {
                 val text = res.getOrThrow()
                 val latency = System.currentTimeMillis() - start
@@ -648,60 +841,272 @@ class MultiProviderRouter(
         return null
     }
 
+    private suspend fun dispatchHttpProvider(
+        provider: AiProviderType,
+        endpoint: String,
+        apiKey: String,
+        model: String,
+        systemInstruction: String,
+        prompt: String
+    ): Result<String> {
+        return when (provider) {
+            AiProviderType.CLAUDE -> callAnthropicMessages(endpoint, apiKey, model, systemInstruction, prompt)
+            AiProviderType.OLLAMA -> callOllamaChat(endpoint, apiKey, model, systemInstruction, prompt)
+            AiProviderType.MCP_SERVER -> callMcpJsonRpc(endpoint, apiKey, model, prompt)
+            AiProviderType.A2A_AGENT -> callA2aJsonRpc(endpoint, apiKey, model, prompt)
+            else -> callOpenAiCompatible(endpoint, apiKey, model, systemInstruction, prompt)
+        }
+    }
+
+    private suspend fun callAnthropicMessages(
+        endpoint: String,
+        apiKey: String,
+        model: String,
+        systemInstruction: String,
+        prompt: String
+    ): Result<String> = executeWithTransientRetries {
+        val bodyJson = JSONObject().apply {
+            put("model", model)
+            put("max_tokens", 1024)
+            if (systemInstruction.isNotBlank()) put("system", systemInstruction)
+            put("messages", JSONArray().apply {
+                put(JSONObject().apply {
+                    put("role", "user")
+                    put("content", prompt)
+                })
+            })
+        }
+        val req = Request.Builder()
+            .url(endpoint)
+            .addHeader("x-api-key", apiKey)
+            .addHeader("anthropic-version", ANTHROPIC_API_VERSION)
+            .addHeader("Content-Type", "application/json")
+            .post(bodyJson.toString().toRequestBody("application/json".toMediaType()))
+            .build()
+        httpClient.newCall(req).execute().use { resp ->
+            val raw = resp.body?.string().orEmpty()
+            if (resp.code == 429) throw RateLimitHttpException("Anthropic rate limit (HTTP 429)")
+            if (resp.code >= 500) throw TransientHttpException("Anthropic HTTP ${resp.code}: ${raw.take(160)}")
+            if (!resp.isSuccessful) throw IllegalStateException("HTTP ${resp.code}: ${raw.take(180)}")
+            val contentArr = JSONObject(raw).optJSONArray("content")
+            val text = (0 until (contentArr?.length() ?: 0))
+                .mapNotNull { contentArr?.optJSONObject(it)?.optString("text")?.takeIf { t -> t.isNotBlank() } }
+                .joinToString("\n")
+                .trim()
+            if (text.isBlank()) throw IllegalStateException("Empty Anthropic response.")
+            text
+        }
+    }
+
+    private suspend fun callOllamaChat(
+        endpoint: String,
+        apiKey: String,
+        model: String,
+        systemInstruction: String,
+        prompt: String
+    ): Result<String> = executeWithTransientRetries {
+        val messages = JSONArray().apply {
+            if (systemInstruction.isNotBlank()) {
+                put(JSONObject().apply {
+                    put("role", "system")
+                    put("content", systemInstruction)
+                })
+            }
+            put(JSONObject().apply {
+                put("role", "user")
+                put("content", prompt)
+            })
+        }
+        val bodyJson = JSONObject().apply {
+            put("model", model)
+            put("stream", false)
+            put("messages", messages)
+        }
+        val builder = Request.Builder()
+            .url(endpoint)
+            .addHeader("Content-Type", "application/json")
+            .post(bodyJson.toString().toRequestBody("application/json".toMediaType()))
+        if (apiKey.isNotBlank()) {
+            builder.addHeader("Authorization", "Bearer $apiKey")
+        }
+        httpClient.newCall(builder.build()).execute().use { resp ->
+            val raw = resp.body?.string().orEmpty()
+            if (resp.code >= 500) throw TransientHttpException("Ollama HTTP ${resp.code}: ${raw.take(160)}")
+            if (!resp.isSuccessful) throw IllegalStateException("HTTP ${resp.code}: ${raw.take(180)}")
+            val json = JSONObject(raw)
+            val msgContent = json.optJSONObject("message")?.optString("content")
+                ?.takeIf { it.isNotBlank() }
+                ?: json.optString("response")
+            if (msgContent.isBlank()) throw IllegalStateException("Empty response from Ollama.")
+            msgContent.trim()
+        }
+    }
+
+    private suspend fun callMcpJsonRpc(
+        endpoint: String,
+        apiKey: String,
+        toolName: String,
+        prompt: String
+    ): Result<String> = executeWithTransientRetries {
+        val rpc = JSONObject().apply {
+            put("jsonrpc", "2.0")
+            put("id", System.currentTimeMillis())
+            put("method", "tools/call")
+            put("params", JSONObject().apply {
+                put("name", toolName.ifBlank { "aura_query" })
+                put("arguments", JSONObject().apply { put("query", prompt) })
+            })
+        }
+        val builder = Request.Builder()
+            .url(endpoint)
+            .addHeader("Content-Type", "application/json")
+            .post(rpc.toString().toRequestBody("application/json".toMediaType()))
+        if (apiKey.isNotBlank()) builder.addHeader("Authorization", "Bearer $apiKey")
+        httpClient.newCall(builder.build()).execute().use { resp ->
+            val raw = resp.body?.string().orEmpty()
+            if (resp.code >= 500) throw TransientHttpException("MCP HTTP ${resp.code}: ${raw.take(160)}")
+            if (!resp.isSuccessful) throw IllegalStateException("MCP HTTP ${resp.code}: ${raw.take(180)}")
+            val json = JSONObject(raw)
+            json.optJSONObject("error")?.let { err ->
+                throw IllegalStateException("MCP JSON-RPC error ${err.optInt("code")}: ${err.optString("message")}")
+            }
+            val resultObj = json.optJSONObject("result")
+            val contentArr = resultObj?.optJSONArray("content")
+            val text = (0 until (contentArr?.length() ?: 0))
+                .mapNotNull { contentArr?.optJSONObject(it)?.optString("text")?.takeIf { s -> s.isNotBlank() } }
+                .joinToString("\n")
+                .ifBlank { resultObj?.toString().orEmpty() }
+            if (text.isBlank()) throw IllegalStateException("Empty MCP result.")
+            text
+        }
+    }
+
+    private suspend fun callA2aJsonRpc(
+        endpoint: String,
+        apiKey: String,
+        agentSkill: String,
+        prompt: String
+    ): Result<String> = executeWithTransientRetries {
+        val rpc = JSONObject().apply {
+            put("jsonrpc", "2.0")
+            put("id", System.currentTimeMillis())
+            put("method", "tasks/send")
+            put("params", JSONObject().apply {
+                put("id", "task-${System.currentTimeMillis()}")
+                put("skill", agentSkill)
+                put("message", JSONObject().apply {
+                    put("role", "user")
+                    put("parts", JSONArray().apply {
+                        put(JSONObject().apply {
+                            put("type", "text")
+                            put("text", prompt)
+                        })
+                    })
+                })
+            })
+        }
+        val builder = Request.Builder()
+            .url(endpoint)
+            .addHeader("Content-Type", "application/json")
+            .post(rpc.toString().toRequestBody("application/json".toMediaType()))
+        if (apiKey.isNotBlank()) builder.addHeader("Authorization", "Bearer $apiKey")
+        httpClient.newCall(builder.build()).execute().use { resp ->
+            val raw = resp.body?.string().orEmpty()
+            if (resp.code >= 500) throw TransientHttpException("A2A HTTP ${resp.code}: ${raw.take(160)}")
+            if (!resp.isSuccessful) throw IllegalStateException("A2A HTTP ${resp.code}: ${raw.take(180)}")
+            val json = JSONObject(raw)
+            json.optJSONObject("error")?.let { err ->
+                throw IllegalStateException("A2A error ${err.optInt("code")}: ${err.optString("message")}")
+            }
+            val res = json.optJSONObject("result")
+            val parts = res?.optJSONObject("status")?.optJSONObject("message")?.optJSONArray("parts")
+            val text = (0 until (parts?.length() ?: 0))
+                .mapNotNull { parts?.optJSONObject(it)?.optString("text")?.takeIf { s -> s.isNotBlank() } }
+                .joinToString("\n")
+                .ifBlank { res?.optString("reply", res.optString("output", res.toString())).orEmpty() }
+            if (text.isBlank()) throw IllegalStateException("Empty A2A response.")
+            text
+        }
+    }
+
     private suspend fun callOpenAiCompatible(
         endpoint: String,
         apiKey: String,
         model: String,
         systemInstruction: String,
         prompt: String
-    ): Result<String> = withContext(Dispatchers.IO) {
-        try {
-            val messages = JSONArray().apply {
-                if (systemInstruction.isNotBlank()) {
-                    put(JSONObject().apply {
-                        put("role", "system")
-                        put("content", systemInstruction)
-                    })
-                }
+    ): Result<String> = executeWithTransientRetries {
+        val messages = JSONArray().apply {
+            if (systemInstruction.isNotBlank()) {
                 put(JSONObject().apply {
-                    put("role", "user")
-                    put("content", prompt)
+                    put("role", "system")
+                    put("content", systemInstruction)
                 })
             }
-            val bodyJson = JSONObject().apply {
-                put("model", model)
-                put("messages", messages)
-                put("temperature", 0.4)
-                put("max_tokens", 1024)
-            }
-            val req = Request.Builder()
-                .url(endpoint)
-                .addHeader("Authorization", "Bearer $apiKey")
-                .addHeader("Content-Type", "application/json")
-                .post(bodyJson.toString().toRequestBody("application/json".toMediaType()))
-                .build()
+            put(JSONObject().apply {
+                put("role", "user")
+                put("content", prompt)
+            })
+        }
+        val bodyJson = JSONObject().apply {
+            put("model", model)
+            put("messages", messages)
+            put("temperature", 0.4)
+            put("max_tokens", 1024)
+        }
+        val req = Request.Builder()
+            .url(endpoint)
+            .addHeader("Authorization", "Bearer $apiKey")
+            .addHeader("Content-Type", "application/json")
+            .post(bodyJson.toString().toRequestBody("application/json".toMediaType()))
+            .build()
 
-            httpClient.newCall(req).execute().use { resp ->
-                val raw = resp.body?.string().orEmpty()
-                if (resp.code == 429) {
-                    return@withContext Result.failure(Exception("Rate limit exceeded (HTTP 429). Try fallback or wait."))
-                }
-                if (!resp.isSuccessful) {
-                    return@withContext Result.failure(Exception("HTTP ${resp.code}: ${raw.take(180)}"))
-                }
-                val json = JSONObject(raw)
-                val choices = json.optJSONArray("choices")
-                val content = choices?.optJSONObject(0)?.optJSONObject("message")?.optString("content").orEmpty()
-                if (content.isBlank()) {
-                    Result.failure(Exception("Empty response from provider."))
-                } else {
-                    Result.success(content.trim())
-                }
+        httpClient.newCall(req).execute().use { resp ->
+            val raw = resp.body?.string().orEmpty()
+            if (resp.code == 429) {
+                throw RateLimitHttpException("Rate limit exceeded (HTTP 429). Try fallback or wait.")
             }
-        } catch (e: Exception) {
-            Result.failure(e)
+            if (resp.code >= 500) {
+                throw TransientHttpException("HTTP ${resp.code}: ${raw.take(180)}")
+            }
+            if (!resp.isSuccessful) {
+                throw IllegalStateException("HTTP ${resp.code}: ${raw.take(180)}")
+            }
+            val json = JSONObject(raw)
+            val choices = json.optJSONArray("choices")
+            val content = choices?.optJSONObject(0)?.optJSONObject("message")?.optString("content").orEmpty()
+            if (content.isBlank()) {
+                throw IllegalStateException("Empty response from provider.")
+            }
+            content.trim()
         }
     }
+
+    private suspend fun executeWithTransientRetries(
+        maxAttempts: Int = 2,
+        block: () -> String
+    ): Result<String> = withContext(Dispatchers.IO) {
+        var lastError: Exception? = null
+        for (attempt in 0 until maxAttempts) {
+            try {
+                return@withContext Result.success(block())
+            } catch (e: TransientHttpException) {
+                lastError = e
+                if (attempt + 1 < maxAttempts) kotlinx.coroutines.delay(200L * (attempt + 1))
+            } catch (e: java.net.SocketTimeoutException) {
+                lastError = e
+                if (attempt + 1 < maxAttempts) kotlinx.coroutines.delay(200L * (attempt + 1))
+            } catch (e: RateLimitHttpException) {
+                return@withContext Result.failure(e)
+            } catch (e: Exception) {
+                return@withContext Result.failure(e)
+            }
+        }
+        Result.failure(lastError ?: IllegalStateException("Provider request failed after retries."))
+    }
+
+    private class TransientHttpException(message: String) : Exception(message)
+    private class RateLimitHttpException(message: String) : Exception(message)
 
     private fun selectGeminiModel(modelId: String) = when (modelId) {
         "gemini-3.5-flash-lite" -> geminiLite
@@ -749,5 +1154,6 @@ class MultiProviderRouter(
 
     companion object {
         private const val TAG = "MultiProviderRouter"
+        private const val ANTHROPIC_API_VERSION = "2023-06-01"
     }
 }

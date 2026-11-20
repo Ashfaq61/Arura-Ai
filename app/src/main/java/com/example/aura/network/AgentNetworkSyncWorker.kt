@@ -149,6 +149,18 @@ class AgentNetworkSyncWorker(
     companion object {
         private const val PERIODIC_SYNC_NAME = "aura_global_agent_network_sync"
 
+        private fun getWorkManagerSafe(context: Context): WorkManager? {
+            return runCatching { WorkManager.getInstance(context) }.getOrElse {
+                runCatching {
+                    WorkManager.initialize(
+                        context.applicationContext,
+                        androidx.work.Configuration.Builder().build()
+                    )
+                    WorkManager.getInstance(context)
+                }.getOrNull()
+            }
+        }
+
         fun schedulePeriodicSync(context: Context, intervalMinutes: Int) {
             val safeMinutes = intervalMinutes.coerceAtLeast(15).toLong()
             val constraints = Constraints.Builder()
@@ -158,7 +170,7 @@ class AgentNetworkSyncWorker(
             val req = PeriodicWorkRequestBuilder<AgentNetworkSyncWorker>(safeMinutes, TimeUnit.MINUTES)
                 .setConstraints(constraints)
                 .build()
-            WorkManager.getInstance(context).enqueueUniquePeriodicWork(
+            getWorkManagerSafe(context)?.enqueueUniquePeriodicWork(
                 PERIODIC_SYNC_NAME,
                 ExistingPeriodicWorkPolicy.UPDATE,
                 req
@@ -166,12 +178,12 @@ class AgentNetworkSyncWorker(
         }
 
         fun cancelPeriodicSync(context: Context) {
-            WorkManager.getInstance(context).cancelUniqueWork(PERIODIC_SYNC_NAME)
+            getWorkManagerSafe(context)?.cancelUniqueWork(PERIODIC_SYNC_NAME)
         }
 
         fun triggerImmediateSync(context: Context) {
             val req = OneTimeWorkRequestBuilder<AgentNetworkSyncWorker>().build()
-            WorkManager.getInstance(context).enqueue(req)
+            getWorkManagerSafe(context)?.enqueue(req)
         }
     }
 }

@@ -133,6 +133,76 @@ class ModelRoutingEngine {
             supportsLiveAudio = false,
             supportsOffline = false,
             taskStrength = "Multi-provider fallback (free community quota)"
+        ),
+        ModelCapabilityProfile(
+            providerId = AiProviderType.CLAUDE.id,
+            modelId = "claude-3-7-sonnet-latest",
+            displayName = "Claude 3.7 Sonnet",
+            isPaidTier = true,
+            estimatedCostPer1MTokensUsd = 3.00,
+            contextTokens = 200_000,
+            avgLatencyMs = 1800,
+            supportsTools = true,
+            supportsVision = true,
+            supportsLiveAudio = false,
+            supportsOffline = false,
+            taskStrength = "Architecture review, Kotlin code synthesis, and safety reasoning"
+        ),
+        ModelCapabilityProfile(
+            providerId = AiProviderType.DEEPSEEK.id,
+            modelId = "deepseek-chat",
+            displayName = "DeepSeek V3 Chat",
+            isPaidTier = true,
+            estimatedCostPer1MTokensUsd = 0.27,
+            contextTokens = 64_000,
+            avgLatencyMs = 1400,
+            supportsTools = true,
+            supportsVision = false,
+            supportsLiveAudio = false,
+            supportsOffline = false,
+            taskStrength = "Cost-efficient coding & structured analysis"
+        ),
+        ModelCapabilityProfile(
+            providerId = AiProviderType.GROK.id,
+            modelId = "grok-3-mini",
+            displayName = "xAI Grok 3 Mini",
+            isPaidTier = true,
+            estimatedCostPer1MTokensUsd = 0.30,
+            contextTokens = 131_072,
+            avgLatencyMs = 1200,
+            supportsTools = true,
+            supportsVision = false,
+            supportsLiveAudio = false,
+            supportsOffline = false,
+            taskStrength = "Fast alternative independent reasoning & cross-check"
+        ),
+        ModelCapabilityProfile(
+            providerId = AiProviderType.QWEN.id,
+            modelId = "qwen-plus",
+            displayName = "Qwen Plus",
+            isPaidTier = true,
+            estimatedCostPer1MTokensUsd = 0.40,
+            contextTokens = 128_000,
+            avgLatencyMs = 1100,
+            supportsTools = true,
+            supportsVision = false,
+            supportsLiveAudio = false,
+            supportsOffline = false,
+            taskStrength = "Multilingual & coding OpenAI-compatible inference"
+        ),
+        ModelCapabilityProfile(
+            providerId = AiProviderType.OLLAMA.id,
+            modelId = "llama3.2:3b",
+            displayName = "Ollama Self-Hosted",
+            isPaidTier = false,
+            estimatedCostPer1MTokensUsd = 0.0,
+            contextTokens = 32_768,
+            avgLatencyMs = 600,
+            supportsTools = true,
+            supportsVision = false,
+            supportsLiveAudio = false,
+            supportsOffline = true,
+            taskStrength = "Zero-cost local/LAN Ollama server inference"
         )
     )
 

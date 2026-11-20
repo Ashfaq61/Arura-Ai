@@ -9,6 +9,9 @@ import com.example.aura.github.DEFAULT_AURA_BRANCH
 import com.example.aura.github.GitHubConfig
 import com.example.aura.github.GitHubReleaseAsset
 import com.example.aura.github.GitHubReleaseInfo
+import com.example.aura.github.UpdateHistoryEntry
+import org.json.JSONArray
+import org.json.JSONObject
 import java.security.KeyStore
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
@@ -148,6 +151,54 @@ class GitHubKeyStore(context: Context) {
         )
     }
 
+    fun getLastVerifiedVersionCode(): Long {
+        return prefs.getLong(KEY_LAST_VERIFIED_VCODE, 0L)
+    }
+
+    fun saveLastVerifiedVersionCode(versionCode: Long) {
+        if (versionCode > 0L) {
+            prefs.edit().putLong(KEY_LAST_VERIFIED_VCODE, versionCode).apply()
+        }
+    }
+
+    fun appendUpdateHistory(entry: UpdateHistoryEntry) {
+        val current = getUpdateHistory().toMutableList()
+        current.add(0, entry)
+        val trimmed = current.take(30)
+        val arr = JSONArray()
+        trimmed.forEach { e ->
+            arr.put(JSONObject().apply {
+                put("fromVersion", e.fromVersion)
+                put("toVersion", e.toVersion)
+                put("toVersionCode", e.toVersionCode)
+                put("sha256", e.sha256)
+                put("status", e.status)
+                put("timestamp", e.timestamp)
+                put("notes", e.notes)
+            })
+        }
+        prefs.edit().putString(KEY_UPDATE_HISTORY_JSON, arr.toString()).apply()
+    }
+
+    fun getUpdateHistory(): List<UpdateHistoryEntry> {
+        val raw = prefs.getString(KEY_UPDATE_HISTORY_JSON, null) ?: return emptyList()
+        return runCatching {
+            val arr = JSONArray(raw)
+            (0 until arr.length()).mapNotNull { i ->
+                val obj = arr.optJSONObject(i) ?: return@mapNotNull null
+                UpdateHistoryEntry(
+                    fromVersion = obj.optString("fromVersion"),
+                    toVersion = obj.optString("toVersion"),
+                    toVersionCode = obj.optLong("toVersionCode", 0L),
+                    sha256 = obj.optString("sha256"),
+                    status = obj.optString("status"),
+                    timestamp = obj.optLong("timestamp", 0L),
+                    notes = obj.optString("notes")
+                )
+            }
+        }.getOrDefault(emptyList())
+    }
+
     fun clearAll() {
         prefs.edit().clear().apply()
     }
@@ -228,6 +279,8 @@ class GitHubKeyStore(context: Context) {
         private const val KEY_PREV_RELEASE_ASSET_URL = "gh_prev_release_asset_url"
         private const val KEY_PREV_RELEASE_ASSET_NAME = "gh_prev_release_asset_name"
         private const val KEY_PREV_RELEASE_ASSET_SIZE = "gh_prev_release_asset_size"
+        private const val KEY_LAST_VERIFIED_VCODE = "gh_last_verified_vcode"
+        private const val KEY_UPDATE_HISTORY_JSON = "gh_update_history_json"
         private const val ANDROID_KEYSTORE = "AndroidKeyStore"
         private const val TRANSFORMATION = "AES/GCM/NoPadding"
     }

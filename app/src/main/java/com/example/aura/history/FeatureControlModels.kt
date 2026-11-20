@@ -285,3 +285,82 @@ data class AgentCommunicationHistoryUiState(
     val isLoading: Boolean = false
 )
 
+enum class FeatureLifecycleStage(val label: String) {
+    DISCOVERED("DISCOVERED"),
+    RESEARCHING("RESEARCHING"),
+    DEVELOPING("DEVELOPING"),
+    TESTING("TESTING"),
+    READY("READY"),
+    INSTALLING("INSTALLING"),
+    ACTIVE("ACTIVE"),
+    FAILED("FAILED"),
+    BLOCKED("BLOCKED"),
+    ROLLED_BACK("ROLLED_BACK")
+}
+
+data class BacklogPriorityInput(
+    val featureId: String,
+    val featureName: String,
+    val sourcePlatform: String,
+    val userBenefit: Int,     // 1..10
+    val security: Int,        // 1..10 (10 = safest)
+    val reliability: Int,     // 1..10
+    val compatibility: Int,   // 1..10
+    val performance: Int,     // 1..10
+    val cost: Int,            // 1..10 (10 = higher monetary/token cost penalty)
+    val effort: Int,          // 1..10 (10 = higher dev effort penalty)
+    val isBlocked: Boolean = false,
+    val blockReason: String = "",
+    val stage: FeatureLifecycleStage = FeatureLifecycleStage.DISCOVERED
+)
+
+data class BacklogPriorityScore(
+    val input: BacklogPriorityInput,
+    val compositeScore: Double,
+    val priorityTier: String,
+    val stage: FeatureLifecycleStage,
+    val breakdown: String
+)
+
+/**
+ * Deterministic multi-factor priority scorer evaluating:
+ * user benefit (0.28), security (0.22), reliability (0.16), compatibility (0.14),
+ * performance (0.10), minus cost penalty (0.05) and effort penalty (0.05).
+ */
+object BacklogPriorityScorer {
+    fun score(input: BacklogPriorityInput): BacklogPriorityScore {
+        val raw = (input.userBenefit.coerceIn(1, 10) * 2.8) +
+            (input.security.coerceIn(1, 10) * 2.2) +
+            (input.reliability.coerceIn(1, 10) * 1.6) +
+            (input.compatibility.coerceIn(1, 10) * 1.4) +
+            (input.performance.coerceIn(1, 10) * 1.0) -
+            (input.cost.coerceIn(1, 10) * 0.5) -
+            (input.effort.coerceIn(1, 10) * 0.5)
+        val rounded = kotlin.math.round(raw * 10.0) / 10.0
+        val effectiveStage = if (input.isBlocked) FeatureLifecycleStage.BLOCKED else input.stage
+        val tier = when {
+            effectiveStage == FeatureLifecycleStage.BLOCKED -> "BLOCKED"
+            rounded >= 65.0 -> "P0_CRITICAL"
+            rounded >= 50.0 -> "P1_HIGH"
+            rounded >= 35.0 -> "P2_MEDIUM"
+            else -> "P3_LOW"
+        }
+        val summary = "Benefit=${input.userBenefit} Sec=${input.security} Rel=${input.reliability} Compat=${input.compatibility} Perf=${input.performance} Cost=-${input.cost} Effort=-${input.effort}"
+        return BacklogPriorityScore(
+            input = input.copy(stage = effectiveStage),
+            compositeScore = rounded,
+            priorityTier = tier,
+            stage = effectiveStage,
+            breakdown = summary
+        )
+    }
+
+    fun rankBacklog(items: List<BacklogPriorityInput>): List<BacklogPriorityScore> {
+        return items.map(::score).sortedWith(
+            compareBy<BacklogPriorityScore> { it.stage == FeatureLifecycleStage.BLOCKED }
+                .thenByDescending { it.compositeScore }
+        )
+    }
+}
+
+

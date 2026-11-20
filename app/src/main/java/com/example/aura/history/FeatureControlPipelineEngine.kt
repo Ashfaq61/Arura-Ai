@@ -448,6 +448,25 @@ class FeatureControlPipelineEngine(
                 finalOutcome = "FAILED: $reason",
                 prefs = prefs
             )
+            historyRepo.recordRegistryEvent(
+                FeatureRegistryHistoryEntity(
+                    featureId = req.resultFeatureId.ifBlank { reqId },
+                    featureName = "Request $reqId ($requestMode)",
+                    description = safePrompt,
+                    discoverySource = "Feature Pipeline Stage ${req.currentStage}",
+                    recommendingAgent = "Error Recovery Agent",
+                    participatingAgentsCsv = "Error Recovery Agent, Testing Agent",
+                    discoveredAt = req.createdAt,
+                    version = "0.0.0-failed",
+                    changeEventType = "FAILED",
+                    dependencies = requestMode,
+                    permissionsRequired = "None",
+                    testResults = "FAILED: $reason",
+                    activationStatus = "FAILED",
+                    decisionReason = "Pipeline halted at stage ${req.currentStage}: $reason",
+                    versionDiffSummary = "Failed at stage ${req.currentStage}"
+                )
+            )
             val failed = req.copy(
                 status = "FAILED",
                 failureReason = reason,
@@ -733,8 +752,9 @@ class FeatureControlPipelineEngine(
             memoryRepo.getAllToolsOnce().firstOrNull { it.id == toolId }?.let { t ->
                 if (prop.previousVersion == null) {
                     memoryRepo.upsertTool(t.copy(status = "INSTALLED_DISABLED", updatedAt = System.currentTimeMillis()))
+                    agentNetwork.unregisterMcpTool(com.example.aura.agents.McpRuntimeEngine.extractMcpSlug(t))
                 } else {
-                    memoryRepo.upsertTool(t.copy(version = prevVer, status = "INSTALLED_ENABLED", updatedAt = System.currentTimeMillis()))
+                    toolFactory.rollbackTool(t, prop.previousStateSnapshotJson, "Rolled back proposal ${prop.id}")
                 }
             }
         }
@@ -943,27 +963,30 @@ class FeatureControlPipelineEngine(
                     prompt.contains(it.name, ignoreCase = true)
                 } ?: existingTools.firstOrNull()
                 if (target != null) {
-                    val prevVer = target.version
-                    val parts = prevVer.split(".").mapNotNull { it.toIntOrNull() }
-                    val nextVer = if (parts.size == 3) "${parts[0]}.${parts[1] + 1}.0" else "$prevVer.1"
-                    val upgraded = target.copy(
-                        previousVersion = prevVer,
-                        version = nextVer,
-                        description = "${target.description} [Enhanced: ${prompt.take(80)}]",
-                        updatedAt = System.currentTimeMillis()
+                    val rollbackSnapshot = ToolFactoryAndEvolutionEngine.buildToolRollbackSnapshot(target)
+                    val upgradeRes = toolFactory.upgradeToolWithRealCapabilities(
+                        tool = target,
+                        upgradeReason = prompt.take(120),
+                        requestedCapabilities = listOf("redactPii", "structuredOutput", "metrics", "enhancedExecution")
                     )
-                    memoryRepo.upsertTool(upgraded)
-                    DevelopmentOutcome(
-                        featureId = target.id,
-                        featureName = "${target.name} (Upgraded)",
-                        description = upgraded.description,
-                        targetVersion = nextVer,
-                        previousVersion = prevVer,
-                        devSummary = "Upgraded '${target.name}' from v$prevVer to v$nextVer.",
-                        versionDiff = "~ v$prevVer -> v$nextVer: Added capability enhancement '${prompt.take(90)}'",
-                        testReport = "PASSED: Schema compatibility & non-regression checks vs v$prevVer.",
-                        testsPassed = true,
-                        rollbackSnapshotJson = """{"devType":"TOOL_UPGRADE","toolId":"${target.id}","previousVersion":"$prevVer"}"""
+                    upgradeRes.fold(
+                        onSuccess = { upgraded ->
+                            DevelopmentOutcome(
+                                featureId = target.id,
+                                featureName = "${target.name} (Upgraded)",
+                                description = upgraded.description,
+                                targetVersion = upgraded.version,
+                                previousVersion = upgraded.previousVersion ?: target.version,
+                                devSummary = "Upgraded '${target.name}' executable MCP contract & capabilities from v${target.version} to v${upgraded.version}.",
+                                versionDiff = "~ v${target.version} -> v${upgraded.version}: Upgraded MCP runtime schema & capabilities for '${prompt.take(80)}'",
+                                testReport = upgraded.testResults,
+                                testsPassed = true,
+                                rollbackSnapshotJson = rollbackSnapshot
+                            )
+                        },
+                        onFailure = { err ->
+                            throw IllegalStateException("Real capability upgrade failed for '${target.name}': ${err.localizedMessage}")
+                        }
                     )
                 } else {
                     synthesizeSandboxedToolOutcome(reqId, prompt, linkedRec, permissions)

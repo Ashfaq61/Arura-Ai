@@ -32,6 +32,38 @@ enum class AiProviderType(
         defaultModels = listOf("meta-llama/llama-3.3-70b-instruct:free", "qwen/qwen-2.5-72b-instruct", "deepseek/deepseek-chat"),
         description = "Unified multi-model router supporting free and paid open-weights models."
     ),
+    CLAUDE(
+        id = "CLAUDE",
+        displayName = "Anthropic Claude",
+        requiresApiKey = true,
+        defaultBaseUrl = "https://api.anthropic.com/v1/messages",
+        defaultModels = listOf("claude-3-7-sonnet-latest", "claude-3-5-haiku-latest"),
+        description = "Anthropic Messages API (x-api-key + anthropic-version 2023-06-01) for coding, analysis & safety review."
+    ),
+    GROK(
+        id = "GROK",
+        displayName = "xAI Grok",
+        requiresApiKey = true,
+        defaultBaseUrl = "https://api.x.ai/v1/chat/completions",
+        defaultModels = listOf("grok-3-mini", "grok-3"),
+        description = "xAI Grok OpenAI-compatible reasoning endpoint."
+    ),
+    DEEPSEEK(
+        id = "DEEPSEEK",
+        displayName = "DeepSeek",
+        requiresApiKey = true,
+        defaultBaseUrl = "https://api.deepseek.com/chat/completions",
+        defaultModels = listOf("deepseek-chat", "deepseek-reasoner"),
+        description = "DeepSeek V3 / R1 reasoning and coding inference API."
+    ),
+    QWEN(
+        id = "QWEN",
+        displayName = "Alibaba Qwen",
+        requiresApiKey = true,
+        defaultBaseUrl = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions",
+        defaultModels = listOf("qwen-plus", "qwen-turbo", "qwen2.5-coder-32b-instruct"),
+        description = "Alibaba Cloud DashScope OpenAI-compatible Qwen inference."
+    ),
     HUGGING_FACE(
         id = "HUGGING_FACE",
         displayName = "Hugging Face Inference",
@@ -39,6 +71,30 @@ enum class AiProviderType(
         defaultBaseUrl = "https://router.huggingface.co/v1/chat/completions",
         defaultModels = listOf("Qwen/Qwen2.5-72B-Instruct", "meta-llama/Llama-3.3-70B-Instruct", "mistralai/Mistral-7B-Instruct-v0.3"),
         description = "Open-source models hosted on Hugging Face Inference Router."
+    ),
+    OLLAMA(
+        id = "OLLAMA",
+        displayName = "Ollama (Local/LAN)",
+        requiresApiKey = false,
+        defaultBaseUrl = "http://127.0.0.1:11434/api/chat",
+        defaultModels = listOf("llama3.2:3b", "qwen2.5:7b", "gemma3:4b"),
+        description = "Self-hosted Ollama local or LAN inference server (/api/chat & /api/tags). No API key needed locally."
+    ),
+    MCP_SERVER(
+        id = "MCP_SERVER",
+        displayName = "MCP HTTP Server",
+        requiresApiKey = false,
+        defaultBaseUrl = "http://127.0.0.1:3000/mcp",
+        defaultModels = listOf("mcp-jsonrpc-2.0"),
+        description = "Model Context Protocol JSON-RPC 2.0 server (tools/list & tools/call)."
+    ),
+    A2A_AGENT(
+        id = "A2A_AGENT",
+        displayName = "A2A External Agent",
+        requiresApiKey = false,
+        defaultBaseUrl = "http://127.0.0.1:4000/a2a",
+        defaultModels = listOf("a2a-jsonrpc-2.0"),
+        description = "Agent-to-Agent (A2A) JSON-RPC 2.0 task dispatch and agent card discovery."
     ),
     OPENAI_COMPATIBLE(
         id = "OPENAI_COMPATIBLE",

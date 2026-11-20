@@ -302,6 +302,7 @@ fun GitHubAutoBuildAndUpdateCard(viewModel: AuraViewModel) {
     val autoFixCount by viewModel.autoFixAttemptCount.collectAsStateWithLifecycle()
     val isAutoFixing by viewModel.isAutoFixingBuild.collectAsStateWithLifecycle()
     val selfUpdate by viewModel.selfUpdateState.collectAsStateWithLifecycle()
+    val changelogMarkdown by viewModel.latestChangelogMarkdown.collectAsStateWithLifecycle()
 
     var directMode by remember { mutableStateOf(false) }
     var filePathInput by remember { mutableStateOf("") }
@@ -505,7 +506,10 @@ fun GitHubAutoBuildAndUpdateCard(viewModel: AuraViewModel) {
             }
 
             Spacer(modifier = Modifier.height(6.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
                 OutlinedButton(
                     onClick = { viewModel.refreshBuildStatus() },
                     enabled = config.isConfigured,
@@ -514,6 +518,26 @@ fun GitHubAutoBuildAndUpdateCard(viewModel: AuraViewModel) {
                     Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
                     Spacer(modifier = Modifier.width(4.dp))
                     Text("Check Build")
+                }
+                OutlinedButton(
+                    onClick = { viewModel.createPullRequestForBranch() },
+                    enabled = config.isConfigured && config.token.isNotBlank(),
+                    modifier = Modifier.testTag("create_github_pr_btn")
+                ) {
+                    Text("Open PR")
+                }
+                OutlinedButton(
+                    onClick = { viewModel.triggerGitHubWorkflowDispatch() },
+                    enabled = config.isConfigured && config.token.isNotBlank(),
+                    modifier = Modifier.testTag("trigger_ci_dispatch_btn")
+                ) {
+                    Text("Trigger CI")
+                }
+                OutlinedButton(
+                    onClick = { viewModel.generateCurrentChangelog() },
+                    modifier = Modifier.testTag("generate_changelog_btn")
+                ) {
+                    Text("Changelog")
                 }
                 if (ciRun?.htmlUrl?.isNotBlank() == true) {
                     OutlinedButton(
@@ -531,6 +555,28 @@ fun GitHubAutoBuildAndUpdateCard(viewModel: AuraViewModel) {
                         Text("Run #${ciRun!!.runId}")
                     }
                 }
+            }
+
+            if (selfUpdate.openPullRequests.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(6.dp))
+                Text("Open Pull Requests (${selfUpdate.openPullRequests.size}):", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
+                selfUpdate.openPullRequests.take(5).forEach { pr ->
+                    Text(
+                        text = "#${pr.number} ${pr.title} (${pr.headBranch} -> ${pr.baseBranch})",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+            }
+
+            if (changelogMarkdown.isNotBlank()) {
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = changelogMarkdown,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.testTag("github_generated_changelog_text")
+                )
             }
 
             ciRun?.let { run ->
@@ -650,6 +696,34 @@ fun GitHubAutoBuildAndUpdateCard(viewModel: AuraViewModel) {
                 }
             }
 
+            if (selfUpdate.setupBlockers.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.25f)),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.6f)),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("github_setup_blockers_card")
+                ) {
+                    Column(modifier = Modifier.padding(10.dp)) {
+                        Text(
+                            text = "Setup Blockers (${selfUpdate.setupBlockers.size})",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        selfUpdate.setupBlockers.forEach { blocker ->
+                            Text(
+                                text = "• $blocker",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                        }
+                    }
+                }
+            }
+
             if (selfUpdate.needsUnknownSourcesPermission) {
                 Spacer(modifier = Modifier.height(8.dp))
                 Card(
@@ -741,6 +815,29 @@ fun GitHubAutoBuildAndUpdateCard(viewModel: AuraViewModel) {
                             "Rollback"
                         }
                     )
+                }
+            }
+
+            if (selfUpdate.updateHistory.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(10.dp))
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("update_history_list")
+                ) {
+                    Text(
+                        text = "APK Update & Startup Verification History (${selfUpdate.updateHistory.size})",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                    selfUpdate.updateHistory.take(6).forEach { entry ->
+                        Text(
+                            text = "[${entry.status}] ${entry.fromVersion} -> v${entry.toVersion} (build ${entry.toVersionCode}) • ${entry.notes}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (entry.status == "VERIFIED") MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.error
+                        )
+                    }
                 }
             }
         }

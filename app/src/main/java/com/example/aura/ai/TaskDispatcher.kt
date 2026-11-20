@@ -4,6 +4,7 @@ import android.accessibilityservice.AccessibilityService
 import android.graphics.Bitmap
 import com.example.aura.agents.AgentNetworkManager
 import com.example.aura.agents.AgentStatus
+import com.example.aura.agents.McpRuntimeEngine
 import com.example.aura.automation.AccessibilityBridge
 import com.example.aura.automation.AutomationCommand
 import com.example.aura.automation.DeviceControlEngine
@@ -37,6 +38,7 @@ enum class TaskIntentCategory {
     COMMUNICATION,
     FILE_DOCUMENT,
     MEMORY,
+    MCP_RUNTIME,
     CONVERSATIONAL_AI
 }
 
@@ -50,6 +52,7 @@ object DispatchModuleIds {
     const val COMMUNICATION = "CommunicationModule"
     const val FILE_DOCUMENT = "FileDocumentModule"
     const val MEMORY = "MemoryModule"
+    const val MCP_RUNTIME = "McpRuntimeModule"
 }
 
 sealed interface DispatchTarget {
@@ -124,7 +127,8 @@ class TaskDispatcher(
     private val callMessaging: PhoneCallAndMessagingManager,
     private val privacyRouter: PrivacyDataRouter = PrivacyDataRouter(),
     private val injectionDefender: PromptInjectionDefender = PromptInjectionDefender(),
-    private val selfHealing: SelfHealingEngine? = null
+    private val selfHealing: SelfHealingEngine? = null,
+    private val mcpRuntime: McpRuntimeEngine? = null
 ) {
 
     private val _lastDispatchPlan = MutableStateFlow<TaskDispatchPlan?>(null)
@@ -502,6 +506,24 @@ class TaskDispatcher(
                 )
         }
 
+        // 5b. Registered Executable MCP Tools Runtime Dispatch
+        val matchedMcp = McpRuntimeEngine.findMatchingMcpInvocation(raw, agentNetwork.mcpTools.value)
+        if (matchedMcp != null) {
+            val (toolDesc, toolArg) = matchedMcp
+            return internalPlan(
+                category = TaskIntentCategory.MCP_RUNTIME,
+                code = "MCP_EXEC",
+                safety = "mcp_execute_${toolDesc.name}",
+                moduleId = DispatchModuleIds.MCP_RUNTIME,
+                primaryAgent = "Marketplace Manager Agent",
+                agents = listOf("Marketplace Manager Agent", "Tool Factory Agent", "Security Agent"),
+                targetPkg = toolDesc.name,
+                param = toolArg.ifBlank { raw },
+                confidence = 0.93f,
+                rationale = "Matched registered MCP tool '${toolDesc.name}' (${toolDesc.category}) for genuine runtime execution."
+            )
+        }
+
         // 6. Default Conversational / Reasoning AI Provider Route
         val isComplex = lower.contains("architect") || lower.contains("explain") ||
             lower.contains("code") || lower.contains("debug") || raw.length > 220
@@ -825,6 +847,21 @@ class TaskDispatcher(
 
             DispatchModuleIds.FILE_DOCUMENT -> {
                 true to "File & Document Agent ready. Select a PDF or document in the Files tab for PdfRenderer/SAF inspection and Q&A."
+            }
+
+            DispatchModuleIds.MCP_RUNTIME -> {
+                val engine = mcpRuntime ?: McpRuntimeEngine(
+                    agentNetwork = agentNetwork,
+                    permissionGuard = permissionGuard,
+                    memoryRepository = memoryRepository,
+                    deviceControl = deviceControl,
+                    researchClient = researchClient,
+                    privacyRouter = privacyRouter,
+                    injectionDefender = injectionDefender
+                )
+                val toolSlug = targetPkg.ifBlank { param.substringBefore(" ").trim() }
+                val execResult = engine.executeToolByNameOrQuery(toolSlug, param, dryRun = false)
+                execResult.success to execResult.outputText
             }
 
             else -> false to "Module $moduleId cannot execute without additional user approval or input."

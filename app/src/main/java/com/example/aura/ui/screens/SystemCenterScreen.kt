@@ -185,6 +185,10 @@ private fun MarketplaceTab(viewModel: AuraViewModel) {
                     Spacer(modifier = Modifier.height(8.dp))
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         if (tool.status == "INSTALLED_ENABLED") {
+                            Button(
+                                onClick = { viewModel.testAndRunMarketplaceTool(tool) },
+                                modifier = Modifier.testTag("run_tool_btn_${tool.id}")
+                            ) { Text("Run Tool") }
                             OutlinedButton(onClick = { viewModel.updateMarketplaceToolStatus(tool, "DISABLE") }) { Text("Disable") }
                         } else {
                             Button(onClick = { viewModel.updateMarketplaceToolStatus(tool, "ENABLE") }) { Text("Enable") }
@@ -464,11 +468,22 @@ private fun ApiAndVoiceSettingsTab(viewModel: AuraViewModel) {
     var voiceDropdownExpanded by remember { mutableStateOf(false) }
     var customModelInput by remember(selectedGeminiModel) { mutableStateOf(selectedGeminiModel) }
 
+    val discoveredModels by viewModel.discoveredProviderModels.collectAsStateWithLifecycle()
+    val cloudDevUrl by viewModel.cloudDevBackendUrl.collectAsStateWithLifecycle()
+    val cloudDevHealth by viewModel.cloudDevHealth.collectAsStateWithLifecycle()
+    val lastCloudDevTask by viewModel.lastCloudDevTask.collectAsStateWithLifecycle()
+
     var selectedSlotProvider by remember { mutableStateOf(AiProviderType.GROQ) }
     var keyLabel by remember { mutableStateOf("") }
     var rawKey by remember { mutableStateOf("") }
     var baseUrl by remember { mutableStateOf("") }
     var modelOverride by remember { mutableStateOf("") }
+
+    var cloudDevUrlInput by remember(cloudDevUrl) { mutableStateOf(cloudDevUrl) }
+    var cloudDevTokenInput by remember { mutableStateOf("") }
+    var cloudDevFeatureName by remember { mutableStateOf("dry-check-feature") }
+    var cloudDevTargetPath by remember { mutableStateOf("app/src/main/java/com/example/aura/ui/AuraConstants.kt") }
+    var cloudDevContentInput by remember { mutableStateOf("// AURA 2.1 cloud dev verification check") }
 
     LazyColumn(
         contentPadding = PaddingValues(16.dp),
@@ -582,6 +597,36 @@ private fun ApiAndVoiceSettingsTab(viewModel: AuraViewModel) {
                                     onClick = { viewModel.setProviderAndModel(activeProvider.id, model) },
                                     label = { Text(model) }
                                 )
+                            }
+                        }
+                        if (activeProvider != AiProviderType.LOCAL_OFFLINE) {
+                            Spacer(modifier = Modifier.height(6.dp))
+                            OutlinedButton(
+                                onClick = { viewModel.discoverProviderModels(activeProvider) },
+                                modifier = Modifier.testTag("discover_active_models_btn")
+                            ) {
+                                Text("Discover Live Models / Tools")
+                            }
+                            val liveDiscovered = discoveredModels[activeProvider.id].orEmpty()
+                            if (liveDiscovered.isNotEmpty()) {
+                                Spacer(modifier = Modifier.height(6.dp))
+                                Text(
+                                    "Discovered (${liveDiscovered.size}):",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.tertiary
+                                )
+                                FlowRow(
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    liveDiscovered.take(12).forEach { model ->
+                                        FilterChip(
+                                            selected = prefs.activeModelId == model,
+                                            onClick = { viewModel.setProviderAndModel(activeProvider.id, model) },
+                                            label = { Text(model) }
+                                        )
+                                    }
+                                }
                             }
                         }
                     }
@@ -907,17 +952,25 @@ private fun ApiAndVoiceSettingsTab(viewModel: AuraViewModel) {
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     Spacer(modifier = Modifier.height(8.dp))
-                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         listOf(
                             AiProviderType.GROQ,
                             AiProviderType.OPENROUTER,
+                            AiProviderType.CLAUDE,
+                            AiProviderType.GROK,
+                            AiProviderType.DEEPSEEK,
+                            AiProviderType.QWEN,
                             AiProviderType.HUGGING_FACE,
+                            AiProviderType.OLLAMA,
+                            AiProviderType.MCP_SERVER,
+                            AiProviderType.A2A_AGENT,
                             AiProviderType.OPENAI_COMPATIBLE
                         ).forEach { p ->
                             FilterChip(
                                 selected = selectedSlotProvider == p,
                                 onClick = { selectedSlotProvider = p; baseUrl = p.defaultBaseUrl; modelOverride = p.defaultModels.first() },
-                                label = { Text(p.displayName) }
+                                label = { Text(p.displayName) },
+                                modifier = Modifier.testTag("vault_provider_chip_${p.id.lowercase()}")
                             )
                         }
                     }
@@ -927,7 +980,15 @@ private fun ApiAndVoiceSettingsTab(viewModel: AuraViewModel) {
                     OutlinedTextField(
                         value = rawKey,
                         onValueChange = { rawKey = it },
-                        label = { Text("API Key (Encrypted at Rest)") },
+                        label = {
+                            Text(
+                                if (selectedSlotProvider.requiresApiKey) {
+                                    "API Key (Encrypted at Rest)"
+                                } else {
+                                    "API / Bearer Token (Optional for ${selectedSlotProvider.displayName})"
+                                }
+                            )
+                        },
                         visualTransformation = PasswordVisualTransformation(),
                         modifier = Modifier.fillMaxWidth().testTag("api_key_input")
                     )
@@ -938,20 +999,117 @@ private fun ApiAndVoiceSettingsTab(viewModel: AuraViewModel) {
                     Spacer(modifier = Modifier.height(8.dp))
                     Button(
                         onClick = {
-                            if (rawKey.isNotBlank()) {
+                            if (rawKey.isNotBlank() || !selectedSlotProvider.requiresApiKey) {
                                 viewModel.saveApiKeySlot(selectedSlotProvider.id, keyLabel, rawKey, baseUrl, modelOverride)
                                 rawKey = ""; keyLabel = ""
                             }
                         },
-                        enabled = rawKey.isNotBlank(),
+                        enabled = rawKey.isNotBlank() || !selectedSlotProvider.requiresApiKey,
                         modifier = Modifier.testTag("save_api_key_btn")
-                    ) { Text("Encrypt & Save Key Slot") }
+                    ) {
+                        Text(
+                            if (selectedSlotProvider.requiresApiKey) "Encrypt & Save Key Slot"
+                            else "Save Endpoint Configuration"
+                        )
+                    }
+                }
+            }
+        }
+
+        item {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("cloud_dev_backend_card")
+            ) {
+                Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = "Cloud Self-Coding Dev Backend",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = "Connect tools/cloud_dev_backend.py (HTTPS or localhost) to run isolated-branch code edits and full Gradle unit tests remotely.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    OutlinedTextField(
+                        value = cloudDevUrlInput,
+                        onValueChange = { cloudDevUrlInput = it },
+                        label = { Text("Cloud Dev Backend URL") },
+                        placeholder = { Text("http://127.0.0.1:8787 or https://...") },
+                        singleLine = true,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("cloud_dev_url_input")
+                    )
+                    OutlinedTextField(
+                        value = cloudDevTokenInput,
+                        onValueChange = { cloudDevTokenInput = it },
+                        label = { Text("Bearer Token (Optional)") },
+                        visualTransformation = PasswordVisualTransformation(),
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = cloudDevFeatureName,
+                        onValueChange = { cloudDevFeatureName = it },
+                        label = { Text("Task Feature Name") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = cloudDevTargetPath,
+                        onValueChange = { cloudDevTargetPath = it },
+                        label = { Text("Target Repo Path (Non-main branch)") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                        OutlinedButton(
+                            onClick = { viewModel.pingCloudDevBackend(cloudDevUrlInput, cloudDevTokenInput) },
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("ping_cloud_dev_btn")
+                        ) { Text("Ping Dev Backend") }
+                        Button(
+                            onClick = {
+                                viewModel.pingCloudDevBackend(cloudDevUrlInput, cloudDevTokenInput)
+                                viewModel.submitCloudDevTask(
+                                    featureName = cloudDevFeatureName,
+                                    targetPath = cloudDevTargetPath,
+                                    content = cloudDevContentInput
+                                )
+                            },
+                            enabled = cloudDevUrlInput.isNotBlank() && cloudDevTargetPath.isNotBlank(),
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("submit_cloud_dev_task_btn")
+                        ) { Text("Submit Dev Task") }
+                    }
+                    cloudDevHealth?.let { health ->
+                        Text(
+                            text = health.message,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (health.reachable) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.error
+                        )
+                    }
+                    lastCloudDevTask?.let { task ->
+                        Text(
+                            text = "Last Dev Task [${task.status}] ${task.featureName} (${task.branch}) • testsPassed=${task.testsPassed} ${task.blockedReason.ifBlank { task.diffSummary }}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (task.status == "COMPLETED") MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.error
+                        )
+                    }
                 }
             }
         }
 
         items(slots, key = { it.id }) { slot ->
             val decrypted = viewModel.vault.getDecryptedKey(slot.id).orEmpty()
+            val slotProvider = AiProviderType.entries.firstOrNull { it.id == slot.providerId } ?: AiProviderType.OPENAI_COMPATIBLE
             Card(
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
                 border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
@@ -963,12 +1121,15 @@ private fun ApiAndVoiceSettingsTab(viewModel: AuraViewModel) {
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
                         Text("${slot.label} (${slot.providerId})", style = MaterialTheme.typography.titleSmall)
-                        Text("Key: ${slot.maskedPreview(decrypted)} • Status: ${slot.lastTestStatus}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+                        Text(
+                            text = "Key: ${if (decrypted.isBlank() && !slotProvider.requiresApiKey) "Keyless Endpoint" else slot.maskedPreview(decrypted)} • Endpoint: ${slot.customBaseUrl.ifBlank { slotProvider.defaultBaseUrl }} • Status: ${slot.lastTestStatus}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary
+                        )
                     }
-                    OutlinedButton(onClick = {
-                        val prov = AiProviderType.entries.firstOrNull { it.id == slot.providerId } ?: AiProviderType.OPENAI_COMPATIBLE
-                        viewModel.testProvider(prov, slot.id)
-                    }) { Text("Test") }
+                    OutlinedButton(onClick = { viewModel.discoverProviderModels(slotProvider, slot.id) }) { Text("Discover") }
+                    Spacer(modifier = Modifier.width(4.dp))
+                    OutlinedButton(onClick = { viewModel.testProvider(slotProvider, slot.id) }) { Text("Test") }
                     IconButton(onClick = { viewModel.deleteApiKeySlot(slot.id) }) {
                         Icon(Icons.Filled.Delete, contentDescription = "Delete key slot", tint = MaterialTheme.colorScheme.error)
                     }

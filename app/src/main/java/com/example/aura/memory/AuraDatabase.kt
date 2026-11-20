@@ -402,5 +402,13 @@ abstract class AuraDatabase : RoomDatabase() {
                     .also { INSTANCE = it }
             }
         }
+
+        fun closeAndResetForTesting(context: Context? = null) {
+            synchronized(this) {
+                runCatching { INSTANCE?.close() }
+                INSTANCE = null
+                context?.applicationContext?.deleteDatabase("aura_autonomous_db")
+            }
+        }
     }
 }

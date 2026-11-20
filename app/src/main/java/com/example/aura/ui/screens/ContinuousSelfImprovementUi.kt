@@ -31,6 +31,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.aura.evolution.AutonomousCycleReport
+import com.example.aura.history.BacklogPriorityScore
+import com.example.aura.history.FeatureLifecycleStage
 import com.example.aura.ui.AuraViewModel
 import com.example.aura.ui.components.StatusPill
 
@@ -38,6 +40,7 @@ import com.example.aura.ui.components.StatusPill
 fun ZeroQuestionAutonomySection(viewModel: AuraViewModel) {
     val prefs by viewModel.preferences.collectAsStateWithLifecycle()
     val lastReport by viewModel.lastAutonomousReport.collectAsStateWithLifecycle()
+    val prioritizedBacklog by viewModel.prioritizedBacklog.collectAsStateWithLifecycle()
 
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Card(
@@ -160,6 +163,60 @@ fun ZeroQuestionAutonomySection(viewModel: AuraViewModel) {
 
         lastReport?.let { report ->
             AutonomousReportCard(report = report)
+        }
+
+        if (prioritizedBacklog.isNotEmpty()) {
+            PrioritizedBacklogCard(items = prioritizedBacklog)
+        }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun PrioritizedBacklogCard(items: List<BacklogPriorityScore>) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("prioritized_backlog_card")
+    ) {
+        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(
+                text = "Prioritized Autonomous Backlog (${items.size})",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.Bold
+            )
+            items.take(8).forEach { score ->
+                val accent = when (score.stage) {
+                    FeatureLifecycleStage.ACTIVE -> MaterialTheme.colorScheme.tertiary
+                    FeatureLifecycleStage.BLOCKED, FeatureLifecycleStage.FAILED -> MaterialTheme.colorScheme.error
+                    FeatureLifecycleStage.ROLLED_BACK -> MaterialTheme.colorScheme.secondary
+                    else -> MaterialTheme.colorScheme.primary
+                }
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Row(
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = "${score.priorityTier} • ${score.input.featureName} (${score.compositeScore})",
+                            style = MaterialTheme.typography.bodySmall,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.weight(1f)
+                        )
+                        StatusPill(text = score.stage.label, accent = accent)
+                    }
+                    Text(
+                        text = "${score.input.sourcePlatform} • ${score.breakdown}" +
+                            if (score.input.blockReason.isNotBlank()) " • Block: ${score.input.blockReason}" else "",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.25f))
+            }
         }
     }
 }

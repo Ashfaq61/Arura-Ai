@@ -188,22 +188,28 @@ class GlobalDiscussionCouncilEngine(
             links = sourceLinks
         )
 
-        // Turn 2: Research / Connected Provider Discovery insight (live Gemini if allowed & online, else grounded synthesis)
+        // Turn 2: Research / Connected Provider Discovery insight (live external AI if configured & allowed, else deterministic synthesis)
         val researchAgent = discoveringAgent.trim().ifBlank {
             participants.firstOrNull { it.contains("Research") || it.contains("Discovery") }
                 ?: "GitHub Research Agent"
         }
-        val aiInsight = if (prefs.intelligenceMode != "LOCAL_ONLY" && prefs.autonomyPolicy.externalApiMasterEnabled) {
+        val configuredProviders = aiRouter.getConfiguredExternalProviders()
+        val primaryExternal = configuredProviders.firstOrNull()
+        val aiInsightResult = if (prefs.intelligenceMode != "LOCAL_ONLY" &&
+            prefs.autonomyPolicy.externalApiMasterEnabled &&
+            primaryExternal != null
+        ) {
             aiRouter.generateOnce(
                 prompt = "Topic [$topicCategory]: $safeTopic\nQuestion: $safeQuestion\nProvide concise specialist discovery findings, compatibility notes, and one key risk.",
                 systemInstruction = "Act as $researchAgent in AURA's AI Discussion Council. Never fabricate benchmark scores.",
+                providerId = primaryExternal.id,
                 taskType = "council_discovery",
                 redactSensitiveData = prefs.redactSensitiveData
-            ).getOrNull()?.text.orEmpty()
-        } else ""
+            ).getOrNull()
+        } else null
 
-        val discoveryMsg = if (aiInsight.isNotBlank()) {
-            historyRecorder.sanitizeText(aiInsight.take(500), prefs)
+        val discoveryMsg = if (aiInsightResult != null && aiInsightResult.text.isNotBlank()) {
+            historyRecorder.sanitizeText(aiInsightResult.text.take(500), prefs)
         } else {
             "$researchAgent evaluated '$safeTopic' across local AURA capabilities and open-source references. " +
                 "Candidate approach: modular MCP/Kotlin adapter with strict permission scoping."
@@ -212,31 +218,48 @@ class GlobalDiscussionCouncilEngine(
             sessionId = sessionId,
             speaker = researchAgent,
             target = "Main Brain / Orchestrator Agent",
-            provider = "Research Bus",
-            model = if (aiInsight.isNotBlank()) prefs.activeModelId else "Deterministic Heuristic",
+            provider = if (aiInsightResult != null) "External HTTP (${aiInsightResult.providerUsed})" else "On-Device Research Heuristic",
+            model = aiInsightResult?.modelUsed ?: "Deterministic Heuristic",
             stance = "DISCOVERY",
             text = discoveryMsg,
             links = sourceLinks
         )
 
-        // Turn 3: Evidence-based challenge / disagreement from Security or Performance Agent
+        // Turn 3: Evidence-based independent challenge / critique (uses secondary configured provider or connected external agent when available)
         val challenger = "Security & Policy Guard Agent"
         val health = deviceControl.readDeviceHealth()
         val hasExternalLinks = sourceLinks.any { it.startsWith("http") }
+        val secondaryProvider = configuredProviders.firstOrNull { it != primaryExternal }
+        val externalChallenge = if (prefs.intelligenceMode != "LOCAL_ONLY" &&
+            prefs.autonomyPolicy.externalApiMasterEnabled &&
+            secondaryProvider != null
+        ) {
+            aiRouter.generateOnce(
+                prompt = "Critique this proposal for Android safety, RAM fit (${health.availableRamMb}/${health.totalRamMb} MB), license, and security risks:\nTopic: $safeTopic\nDiscovery: ${discoveryMsg.take(260)}",
+                systemInstruction = "Act as Security & Performance Reviewer. Be concise and evidence-focused.",
+                providerId = secondaryProvider.id,
+                taskType = "council_challenge",
+                redactSensitiveData = prefs.redactSensitiveData
+            ).getOrNull()
+        } else null
+
         val challengeMsg = buildString {
             append("CHALLENGE & EVIDENCE: ")
-            if (hasExternalLinks) {
-                append("External repo/model links (${sourceLinks.joinToString()}) cannot be dynamically executed at runtime (.dex/.jar prohibited). ")
+            if (externalChallenge != null && externalChallenge.text.isNotBlank()) {
+                append(historyRecorder.sanitizeText(externalChallenge.text.take(320), prefs))
+                append(" ")
             }
-            append("Device currently has ${health.availableRamMb}/${health.totalRamMb} MB RAM and ${"%.1f".format(health.freeStorageGb)} GB free storage. ")
-            append("Recommend explicit user approval before activating any external endpoint or elevated permission.")
+            if (hasExternalLinks) {
+                append("External repo/model links (${sourceLinks.joinToString()}) cannot be dynamically loaded (.dex/.jar prohibited). ")
+            }
+            append("Device currently has ${health.availableRamMb}/${health.totalRamMb} MB RAM and ${"%.1f".format(health.freeStorageGb)} GB free storage.")
         }
         insertTurn(
             sessionId = sessionId,
             speaker = challenger,
             target = researchAgent,
-            provider = "On-Device PolicyGuard",
-            model = "Static Safety & Resource Analyzer",
+            provider = if (externalChallenge != null) "External HTTP (${externalChallenge.providerUsed})" else "On-Device PolicyGuard",
+            model = externalChallenge?.modelUsed ?: "Static Safety & Resource Analyzer",
             stance = "CHALLENGE",
             text = challengeMsg,
             links = sourceLinks
@@ -251,7 +274,7 @@ class GlobalDiscussionCouncilEngine(
             sessionId = sessionId,
             speaker = engineerAgent,
             target = "Main Brain / Orchestrator Agent",
-            provider = "AURA MCP Sandbox",
+            provider = "On-Device AURA MCP Sandbox",
             model = "Architecture Evaluator",
             stance = "ALTERNATIVE",
             text = altMsg
@@ -583,14 +606,22 @@ class GlobalDiscussionCouncilEngine(
     }
 
     /**
-     * Live real-data research sweep from GitHub & Hugging Face followed by deduplicated evaluation.
+     * Live real-data research sweep from GitHub, Hugging Face, and MCP/A2A directories followed by deduplicated evaluation.
      */
     suspend fun runLiveTechWatchSweep(prefs: AuraPreferences = AuraPreferences()): Int {
         if (!prefs.autonomyPolicy.externalApiMasterEnabled || prefs.intelligenceMode == "LOCAL_ONLY") return 0
         val ram = deviceControl.readDeviceHealth().totalRamMb
         val gh = researchClient.searchGitHubProjects("android ai mcp agent", ram).getOrDefault(emptyList())
         val hf = researchClient.searchHuggingFaceModels("gemma voice", ram).getOrDefault(emptyList())
-        val combined = (gh.take(2) + hf.take(2))
+        val mcpA2a = researchClient.searchMcpAndA2aDirectories(ram).getOrDefault(emptyList())
+        val existingProj = memoryRepo.getAllResearchProjectsOnce()
+        val existingTools = memoryRepo.getAllToolsOnce()
+        val deduped = researchClient.deduplicateAndCompareVersions(
+            candidates = (gh.take(2) + hf.take(2) + mcpA2a.take(2)),
+            existingProjects = existingProj,
+            existingTools = existingTools
+        )
+        val combined = deduped.filter { !it.isDuplicate || it.hasNewerRelease }.map { it.candidate }
         if (combined.isNotEmpty()) memoryRepo.upsertResearchProjects(combined)
 
         var evaluated = 0

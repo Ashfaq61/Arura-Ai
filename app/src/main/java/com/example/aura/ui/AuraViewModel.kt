@@ -6,6 +6,8 @@ import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.aura.agents.AgentNetworkManager
+import com.example.aura.agents.McpRuntimeEngine
+import com.example.aura.agents.McpToolDescriptor
 import com.example.aura.ai.AiProviderType
 import com.example.aura.ai.AuraLanguage
 import com.example.aura.ai.AuraOrchestrator
@@ -26,6 +28,10 @@ import com.example.aura.automation.AutomationCommand
 import com.example.aura.automation.DeviceControlEngine
 import com.example.aura.automation.DeviceHealthSnapshot
 import com.example.aura.automation.NotificationBridge
+import com.example.aura.backend.CloudDevBackendClient
+import com.example.aura.backend.CloudDevBackendHealth
+import com.example.aura.backend.CloudDevTaskResult
+import com.example.aura.backend.CloudDevTaskSubmission
 import com.example.aura.calls.PhoneCallAndMessagingManager
 import com.example.aura.evolution.AutonomousCycleReport
 import com.example.aura.evolution.ContinuousSelfImprovementEngine
@@ -43,18 +49,23 @@ import com.example.aura.github.CiBuildStage
 import com.example.aura.github.DEFAULT_AURA_BRANCH
 import com.example.aura.github.GitHubConfig
 import com.example.aura.github.GitHubFileDraft
+import com.example.aura.github.GitHubPullRequestInfo
 import com.example.aura.github.GitHubPushGuard
 import com.example.aura.github.GitHubReleaseInfo
 import com.example.aura.github.GitHubSelfUpdateClient
 import com.example.aura.github.GitHubWorkflowRunStatus
+import com.example.aura.github.GitHubSetupDiagnostics
 import com.example.aura.github.MAX_AUTO_FIX_ATTEMPTS
 import com.example.aura.github.PackageInstallFeedback
 import com.example.aura.github.PendingGitHubPushProposal
 import com.example.aura.github.PushGuardResult
 import com.example.aura.github.SelfUpdateUiState
+import com.example.aura.github.UpdateHistoryEntry
+import com.example.aura.history.BacklogPriorityScore
 import com.example.aura.memory.ApprovalRequestEntity
 import com.example.aura.memory.AuraDatabase
 import com.example.aura.memory.AuraPreferences
+import com.example.aura.memory.FeatureRegistryHistoryEntity
 import com.example.aura.memory.LongHorizonTaskEntity
 import com.example.aura.memory.MarketplaceToolEntity
 import com.example.aura.memory.MemoryEntryEntity
@@ -84,6 +95,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -120,8 +132,24 @@ class AuraViewModel(application: Application) : AndroidViewModel(application) {
         geminiRestClient = geminiRestClient,
         preferencesRepository = preferencesRepository
     )
+    val mcpRuntime = McpRuntimeEngine(
+        context = application,
+        agentNetwork = agentNetwork,
+        permissionGuard = permissionGuard,
+        memoryRepository = memoryRepository,
+        deviceControl = deviceControl,
+        researchClient = researchClient,
+        privacyRouter = privacyRouter,
+        injectionDefender = injectionDefender
+    )
     val toolFactory = ToolFactoryAndEvolutionEngine(
-        aiRouter, researchClient, memoryRepository, agentNetwork, permissionGuard, deviceControl
+        aiRouter = aiRouter,
+        researchClient = researchClient,
+        memoryRepository = memoryRepository,
+        agentNetwork = agentNetwork,
+        permissionGuard = permissionGuard,
+        deviceControl = deviceControl,
+        mcpRuntime = mcpRuntime
     )
     val longHorizonEngine = LongHorizonAndSkillEngine(
         aiRouter, memoryRepository, injectionDefender, permissionGuard
@@ -149,7 +177,8 @@ class AuraViewModel(application: Application) : AndroidViewModel(application) {
         callMessaging = callMessaging,
         privacyRouter = privacyRouter,
         injectionDefender = injectionDefender,
-        selfHealing = selfHealing
+        selfHealing = selfHealing,
+        mcpRuntime = mcpRuntime
     )
     val orchestrator = AuraOrchestrator(
         aiRouter = aiRouter,
@@ -417,18 +446,44 @@ class AuraViewModel(application: Application) : AndroidViewModel(application) {
         networkOnlineProvider = { selfHealing.isNetworkOnline() }
     )
 
+    val cloudDevClient: CloudDevBackendClient = CloudDevBackendClient(application, expansion.gateway)
+
+    private val _startupAutonomousCycleTriggered = MutableStateFlow(false)
+    val startupAutonomousCycleTriggered: StateFlow<Boolean> = _startupAutonomousCycleTriggered.asStateFlow()
+
     val lastAutonomousReport: StateFlow<AutonomousCycleReport?> = continuousSelfImprovement.lastReport
+    val prioritizedBacklog: StateFlow<List<BacklogPriorityScore>> = continuousSelfImprovement.prioritizedBacklog
+
+    private val _discoveredProviderModels = MutableStateFlow<Map<String, List<String>>>(emptyMap())
+    val discoveredProviderModels: StateFlow<Map<String, List<String>>> = _discoveredProviderModels.asStateFlow()
+
+    private val _cloudDevBackendUrl = MutableStateFlow(cloudDevClient.getSavedBackendUrl())
+    val cloudDevBackendUrl: StateFlow<String> = _cloudDevBackendUrl.asStateFlow()
+
+    private val _cloudDevHealth = MutableStateFlow<CloudDevBackendHealth?>(null)
+    val cloudDevHealth: StateFlow<CloudDevBackendHealth?> = _cloudDevHealth.asStateFlow()
+
+    private val _lastCloudDevTask = MutableStateFlow<CloudDevTaskResult?>(null)
+    val lastCloudDevTask: StateFlow<CloudDevTaskResult?> = _lastCloudDevTask.asStateFlow()
+
+    private val _latestChangelogMarkdown = MutableStateFlow("")
+    val latestChangelogMarkdown: StateFlow<String> = _latestChangelogMarkdown.asStateFlow()
 
     init {
+        toolFactory.historyRecorder = historyController.recorder
+        toolFactory.featureHistoryRepo = historyController.historyRepo
         expansion.initialize()
         historyController.initialize()
         globalNetworkController.initialize()
         viewModelScope.launch {
             memoryRepository.seedInitialCatalogIfEmpty()
-            SelfEvolutionWorker.schedulePeriodic(getApplication())
+            mcpRuntime.syncEnabledToolsToNetwork()
             refreshHealth()
 
-            val currentPrefs = preferences.value
+            val currentPrefs = preferencesRepository.preferences.first()
+            if (currentPrefs.backgroundEvolutionEnabled) {
+                SelfEvolutionWorker.schedulePeriodic(getApplication())
+            }
             if (currentPrefs.activeProviderId == AiProviderType.FIREBASE_GEMINI.id) {
                 val saved = geminiKeyStore.getSelectedModel()
                 _selectedGeminiModel.value = saved
@@ -445,6 +500,26 @@ class AuraViewModel(application: Application) : AndroidViewModel(application) {
             voiceEngine.refreshConfiguredVoiceIndicator()
             if (currentPrefs.activeVoiceName != savedVoice) {
                 preferencesRepository.setActiveVoice(savedVoice)
+            }
+
+            // Post-install / startup integrity verification (preserves user data, detects crashes & version upgrades)
+            verifyPostInstallStartupHealth()
+
+            // Priority 9: Detect missing GitHub/install setup blockers immediately on startup
+            val setupBlockers = refreshGitHubSetupDiagnostics()
+            if (setupBlockers.isNotEmpty()) {
+                memoryRepository.logAudit(
+                    actor = "GitHub Setup Diagnostics",
+                    action = "STARTUP_BLOCKER_CHECK",
+                    safetyLevel = 2,
+                    outcome = "BLOCKED",
+                    details = setupBlockers.joinToString(" | ")
+                )
+            }
+
+            // Priority 1: Trigger real autonomous discovery & improvement cycle immediately on startup
+            if (currentPrefs.zeroQuestionAutonomyEnabled && !_startupAutonomousCycleTriggered.value) {
+                runStartupAutonomousCycle(currentPrefs)
             }
         }
         viewModelScope.launch {
@@ -478,12 +553,23 @@ class AuraViewModel(application: Application) : AndroidViewModel(application) {
                 when (feedback) {
                     is PackageInstallFeedback.Idle -> Unit
                     is PackageInstallFeedback.Succeeded -> {
-                        val (verName, _) = ApkVersionComparator.getInstalledVersionInfo(getApplication())
+                        val (verName, verCode) = ApkVersionComparator.getInstalledVersionInfo(getApplication())
                         gitHubKeyStore.saveLastWorkingVersion("v$verName")
+                        gitHubKeyStore.appendUpdateHistory(
+                            UpdateHistoryEntry(
+                                fromVersion = _selfUpdateState.value.installedVersionName,
+                                toVersion = verName,
+                                toVersionCode = verCode,
+                                sha256 = "",
+                                status = "VERIFIED",
+                                notes = feedback.message
+                            )
+                        )
                         _selfUpdateState.value = _selfUpdateState.value.copy(
                             lastWorkingVersion = "v$verName",
                             statusMessage = feedback.message,
-                            errorMessage = null
+                            errorMessage = null,
+                            updateHistory = gitHubKeyStore.getUpdateHistory()
                         )
                         _statusBanner.value = feedback.message
                     }
@@ -735,6 +821,18 @@ class AuraViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    suspend fun runStartupAutonomousCycle(prefsOverride: AuraPreferences? = null): AutonomousCycleReport {
+        _startupAutonomousCycleTriggered.value = true
+        val effectivePrefs = prefsOverride ?: preferencesRepository.preferences.first()
+        val report = continuousSelfImprovement.runAutonomousCycle(
+            focusTopic = "android ai agent automation",
+            prefs = effectivePrefs,
+            gitHubConfig = _gitHubConfig.value
+        )
+        refreshGitHubSetupDiagnostics()
+        return report
+    }
+
     fun runSelfEvolutionCycle(topic: String) {
         viewModelScope.launch {
             _isBusy.value = true
@@ -743,6 +841,7 @@ class AuraViewModel(application: Application) : AndroidViewModel(application) {
                 prefs = preferences.value,
                 gitHubConfig = _gitHubConfig.value
             )
+            refreshGitHubSetupDiagnostics()
             _statusBanner.value = "Autonomous Cycle #${report.cycleId} (${report.cycleStatus}): " +
                 "+${report.toolsInstalledOrActivated.size} installed, ^${report.toolsUpgraded.size} upgraded, " +
                 "+${report.agentsCreatedOrUpgraded.size} agents, ~${report.bugsFixedOrRolledBack.size} fixes"
@@ -942,34 +1041,207 @@ class AuraViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun testAndRunMarketplaceTool(tool: MarketplaceToolEntity, sampleInput: String = "") {
+        viewModelScope.launch {
+            val probe = sampleInput.ifBlank { "Live runtime test for ${tool.name} on battery/memory check" }
+            val res = mcpRuntime.executeMarketplaceTool(tool, probe, dryRun = false)
+            _statusBanner.value = if (res.success) {
+                "${tool.name} executed (${res.latencyMs}ms): ${res.outputText.take(120)}"
+            } else {
+                "${tool.name} failed (${res.operation}): ${res.outputText}"
+            }
+        }
+    }
+
     fun updateMarketplaceToolStatus(tool: MarketplaceToolEntity, action: String) {
         viewModelScope.launch {
-            val updated = when (action) {
-                "ENABLE" -> tool.copy(status = "INSTALLED_ENABLED", updatedAt = System.currentTimeMillis())
-                "DISABLE" -> tool.copy(status = "INSTALLED_DISABLED", updatedAt = System.currentTimeMillis())
-                "INSTALL" -> tool.copy(status = "INSTALLED_ENABLED", updatedAt = System.currentTimeMillis())
-                "UPDATE" -> tool.copy(
-                    previousVersion = tool.version,
-                    version = tool.updateAvailableVersion ?: tool.version,
-                    updateAvailableVersion = null,
-                    status = "INSTALLED_ENABLED",
-                    updatedAt = System.currentTimeMillis()
-                )
-                "ROLLBACK" -> tool.copy(
-                    version = tool.previousVersion ?: tool.version,
-                    previousVersion = null,
-                    status = "INSTALLED_ENABLED",
-                    updatedAt = System.currentTimeMillis()
-                )
+            val histRepo = historyController.historyRepo
+            val slug = McpRuntimeEngine.extractMcpSlug(tool)
+            when (action) {
+                "ENABLE", "INSTALL" -> {
+                    val (verifiedOk, detail) = toolFactory.verifyToolHealthAndExecute(tool)
+                    if (!verifiedOk) {
+                        val failed = tool.copy(
+                            status = "DISABLED_FAULTY",
+                            testResults = "FAILED: $detail",
+                            updatedAt = System.currentTimeMillis()
+                        )
+                        memoryRepository.upsertTool(failed)
+                        agentNetwork.unregisterMcpTool(slug)
+                        histRepo.recordRegistryEvent(
+                            FeatureRegistryHistoryEntity(
+                                featureId = tool.id,
+                                featureName = tool.name,
+                                description = tool.description,
+                                discoverySource = "Marketplace Control",
+                                recommendingAgent = "Testing Agent",
+                                participatingAgentsCsv = "Marketplace Manager Agent, Testing Agent",
+                                discoveredAt = tool.updatedAt,
+                                version = tool.version,
+                                changeEventType = "FAILED",
+                                dependencies = tool.dependencies,
+                                permissionsRequired = tool.requiredPermissions,
+                                testResults = "FAILED: $detail",
+                                activationStatus = "FAILED",
+                                decisionReason = "Activation aborted: runtime verification failed.",
+                                versionDiffSummary = "Activation check failed (v${tool.version})"
+                            )
+                        )
+                        memoryRepository.logAudit("Marketplace Agent", "$action:${tool.name}", 2, "FAILED", detail)
+                        _statusBanner.value = "Activation blocked for '${tool.name}': $detail"
+                        return@launch
+                    }
+                    val enabled = tool.copy(
+                        status = "INSTALLED_ENABLED",
+                        testResults = "PASSED: $detail",
+                        updatedAt = System.currentTimeMillis()
+                    )
+                    memoryRepository.upsertTool(enabled)
+                    agentNetwork.registerMcpTool(
+                        McpToolDescriptor(
+                            name = slug,
+                            category = enabled.category,
+                            description = enabled.description,
+                            inputSchemaJson = McpRuntimeEngine.extractSchemaString(enabled),
+                            safetyLevel = McpRuntimeEngine.inferSafetyLevel(enabled.requiredPermissions),
+                            enabled = true
+                        )
+                    )
+                    histRepo.recordRegistryEvent(
+                        FeatureRegistryHistoryEntity(
+                            featureId = enabled.id,
+                            featureName = enabled.name,
+                            description = enabled.description,
+                            discoverySource = "Marketplace Control",
+                            recommendingAgent = "Marketplace Manager Agent",
+                            participatingAgentsCsv = "User, Marketplace Manager Agent, Testing Agent",
+                            discoveredAt = enabled.updatedAt,
+                            version = enabled.version,
+                            changeEventType = "ACTIVATED",
+                            dependencies = enabled.dependencies,
+                            permissionsRequired = enabled.requiredPermissions,
+                            installationDate = System.currentTimeMillis(),
+                            testResults = enabled.testResults,
+                            activationStatus = "ACTIVE",
+                            decisionReason = "Verified runtime execution and enabled in MCP runtime.",
+                            versionDiffSummary = "Activated v${enabled.version}"
+                        )
+                    )
+                    memoryRepository.logAudit("Marketplace Agent", "$action:${tool.name}", 2, "ALLOWED", "Activated v${enabled.version} ($detail)")
+                    _statusBanner.value = "Verified & activated '${tool.name}' in MCP runtime."
+                }
+                "DISABLE" -> {
+                    val disabled = tool.copy(status = "INSTALLED_DISABLED", updatedAt = System.currentTimeMillis())
+                    memoryRepository.upsertTool(disabled)
+                    agentNetwork.unregisterMcpTool(slug)
+                    histRepo.recordRegistryEvent(
+                        FeatureRegistryHistoryEntity(
+                            featureId = disabled.id,
+                            featureName = disabled.name,
+                            description = disabled.description,
+                            discoverySource = "Marketplace Control",
+                            recommendingAgent = "Marketplace Manager Agent",
+                            participatingAgentsCsv = "User, Marketplace Manager Agent",
+                            discoveredAt = disabled.updatedAt,
+                            version = disabled.version,
+                            changeEventType = "DISABLED",
+                            dependencies = disabled.dependencies,
+                            permissionsRequired = disabled.requiredPermissions,
+                            testResults = disabled.testResults,
+                            activationStatus = "DISABLED",
+                            decisionReason = "Disabled by user and unregistered from MCP runtime.",
+                            versionDiffSummary = "Disabled v${disabled.version}"
+                        )
+                    )
+                    memoryRepository.logAudit("Marketplace Agent", "DISABLE:${tool.name}", 2, "ALLOWED", "Disabled v${disabled.version}")
+                }
+                "UPDATE" -> {
+                    val snapshotJson = ToolFactoryAndEvolutionEngine.buildToolRollbackSnapshot(tool)
+                    val upgradeRes = toolFactory.upgradeToolWithRealCapabilities(
+                        tool = tool,
+                        upgradeReason = "User triggered real MCP schema & capability upgrade"
+                    )
+                    upgradeRes.onSuccess { upgraded ->
+                        histRepo.recordRegistryEvent(
+                            FeatureRegistryHistoryEntity(
+                                featureId = upgraded.id,
+                                featureName = upgraded.name,
+                                description = upgraded.description,
+                                discoverySource = "Marketplace Upgrade",
+                                recommendingAgent = "Self-Upgrade Agent",
+                                participatingAgentsCsv = "User, Self-Upgrade Agent, Testing Agent",
+                                discoveredAt = upgraded.updatedAt,
+                                version = upgraded.version,
+                                previousVersion = upgraded.previousVersion,
+                                changeEventType = "UPGRADED",
+                                dependencies = upgraded.dependencies,
+                                permissionsRequired = upgraded.requiredPermissions,
+                                installationDate = System.currentTimeMillis(),
+                                testResults = upgraded.testResults,
+                                activationStatus = "ACTIVE",
+                                decisionReason = "Real capability & schema upgrade verified cleanly.",
+                                versionDiffSummary = "Upgraded v${upgraded.previousVersion} -> v${upgraded.version}",
+                                rollbackSnapshotJson = snapshotJson
+                            )
+                        )
+                        memoryRepository.logAudit("Marketplace Agent", "UPDATE:${tool.name}", 2, "ALLOWED", upgraded.testResults)
+                        _statusBanner.value = "Upgraded '${upgraded.name}' to v${upgraded.version}."
+                    }.onFailure { err ->
+                        val msg = err.localizedMessage ?: "Upgrade verification failed"
+                        memoryRepository.logAudit("Marketplace Agent", "UPDATE:${tool.name}", 2, "FAILED", msg)
+                        _statusBanner.value = "Upgrade rejected for '${tool.name}': $msg"
+                    }
+                }
+                "ROLLBACK" -> {
+                    val restored = toolFactory.rollbackTool(tool, reason = "User initiated Marketplace rollback")
+                    histRepo.recordRegistryEvent(
+                        FeatureRegistryHistoryEntity(
+                            featureId = restored.id,
+                            featureName = restored.name,
+                            description = restored.description,
+                            discoverySource = "Marketplace Rollback",
+                            recommendingAgent = "Marketplace Manager Agent",
+                            participatingAgentsCsv = "User, Marketplace Manager Agent",
+                            discoveredAt = System.currentTimeMillis(),
+                            version = restored.version,
+                            previousVersion = tool.version,
+                            changeEventType = "ROLLED_BACK",
+                            dependencies = restored.dependencies,
+                            permissionsRequired = restored.requiredPermissions,
+                            testResults = restored.testResults,
+                            activationStatus = "ROLLED_BACK",
+                            decisionReason = "User rolled back v${tool.version} -> v${restored.version}.",
+                            versionDiffSummary = "Rolled back v${tool.version} -> v${restored.version}"
+                        )
+                    )
+                    memoryRepository.logAudit("Marketplace Agent", "ROLLBACK:${tool.name}", 3, "ALLOWED", "Restored v${restored.version}")
+                    _statusBanner.value = "Rolled back '${tool.name}' to v${restored.version}."
+                }
                 "UNINSTALL" -> {
                     memoryRepository.deleteTool(tool.id)
+                    agentNetwork.unregisterMcpTool(slug)
+                    histRepo.recordRegistryEvent(
+                        FeatureRegistryHistoryEntity(
+                            featureId = tool.id,
+                            featureName = tool.name,
+                            description = tool.description,
+                            discoverySource = "Marketplace Control",
+                            recommendingAgent = "Marketplace Manager Agent",
+                            participatingAgentsCsv = "User, Marketplace Manager Agent",
+                            discoveredAt = tool.updatedAt,
+                            version = tool.version,
+                            changeEventType = "REMOVED",
+                            dependencies = tool.dependencies,
+                            permissionsRequired = tool.requiredPermissions,
+                            testResults = tool.testResults,
+                            activationStatus = "DISABLED",
+                            decisionReason = "Uninstalled by user and removed from MCP runtime.",
+                            versionDiffSummary = "Removed v${tool.version}"
+                        )
+                    )
                     memoryRepository.logAudit("Marketplace Agent", "UNINSTALL:${tool.name}", 3, "ALLOWED", "Uninstalled tool ${tool.id}")
-                    return@launch
                 }
-                else -> tool
             }
-            memoryRepository.upsertTool(updated)
-            memoryRepository.logAudit("Marketplace Agent", "$action:${tool.name}", 2, "ALLOWED", "Status -> ${updated.status} (v${updated.version})")
         }
     }
 
@@ -1073,7 +1345,7 @@ class AuraViewModel(application: Application) : AndroidViewModel(application) {
     fun saveApiKeySlot(providerId: String, label: String, rawKey: String, baseUrl: String, model: String) {
         val slot = ApiKeySlot(
             providerId = providerId,
-            label = label.ifBlank { "$providerId Key" },
+            label = label.ifBlank { "$providerId Endpoint" },
             customBaseUrl = baseUrl.trim(),
             preferredModel = model.trim()
         )
@@ -1082,7 +1354,74 @@ class AuraViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             memoryRepository.logAudit("Security Agent", "SAVE_API_KEY:$providerId", 2, "ALLOWED", "Encrypted slot '${slot.label}' stored in Android Keystore.")
         }
-        _statusBanner.value = "Encrypted API key saved in Keystore Vault."
+        _statusBanner.value = if (rawKey.isBlank()) "Endpoint configuration saved in Vault." else "Encrypted API key saved in Keystore Vault."
+    }
+
+    fun discoverProviderModels(provider: AiProviderType, slotId: String? = null) {
+        viewModelScope.launch {
+            _isBusy.value = true
+            val res = aiRouter.discoverModelsForProvider(provider, slotId)
+            res.fold(
+                onSuccess = { models ->
+                    val updated = _discoveredProviderModels.value.toMutableMap()
+                    updated[provider.id] = models
+                    _discoveredProviderModels.value = updated
+                    _statusBanner.value = "Discovered ${models.size} model(s)/tool(s) for ${provider.displayName}."
+                },
+                onFailure = { err ->
+                    _statusBanner.value = "${provider.displayName} discovery failed: ${err.localizedMessage}"
+                }
+            )
+            _isBusy.value = false
+        }
+    }
+
+    fun pingCloudDevBackend(urlInput: String, bearerTokenInput: String = "") {
+        val cleanUrl = urlInput.trim()
+        cloudDevClient.saveBackendUrl(cleanUrl)
+        _cloudDevBackendUrl.value = cleanUrl
+        if (bearerTokenInput.isNotBlank()) {
+            expansion.gateway.saveCompanionBearerToken(bearerTokenInput.trim())
+        }
+        viewModelScope.launch {
+            _isBusy.value = true
+            val health = cloudDevClient.checkHealth(cleanUrl)
+            _cloudDevHealth.value = health
+            _statusBanner.value = health.message
+            _isBusy.value = false
+        }
+    }
+
+    fun submitCloudDevTask(
+        featureName: String,
+        targetPath: String,
+        content: String,
+        branch: String = DEFAULT_AURA_BRANCH
+    ) {
+        viewModelScope.launch {
+            _isBusy.value = true
+            val submission = CloudDevTaskSubmission(
+                featureName = featureName.ifBlank { "aura-self-coding-task" },
+                branchName = branch.ifBlank { DEFAULT_AURA_BRANCH },
+                commitMessage = "AURA Cloud Dev: ${featureName.ifBlank { targetPath }}",
+                edits = listOf(GitHubFileDraft(path = targetPath.trim(), newContent = content))
+            )
+            val result = cloudDevClient.submitDevTask(
+                request = submission,
+                backendUrl = _cloudDevBackendUrl.value,
+                allowWorkflowEdits = _gitHubConfig.value.allowWorkflowEdits
+            )
+            _lastCloudDevTask.value = result
+            memoryRepository.logAudit(
+                actor = "Cloud Dev Backend",
+                action = "SUBMIT_DEV_TASK:${result.featureName}",
+                safetyLevel = 3,
+                outcome = result.status,
+                details = result.blockedReason.ifBlank { result.diffSummary }
+            )
+            _statusBanner.value = if (result.blockedReason.isNotBlank()) result.blockedReason else "Cloud Dev Task ${result.status} (testsPassed=${result.testsPassed})"
+            _isBusy.value = false
+        }
     }
 
     fun testProvider(provider: AiProviderType, slotId: String? = null) {
@@ -1270,13 +1609,94 @@ class AuraViewModel(application: Application) : AndroidViewModel(application) {
             lastWorking = "v$verName"
             gitHubKeyStore.saveLastWorkingVersion(lastWorking)
         }
+        val cfg = gitHubKeyStore.loadConfig()
+        val canInstall = apkSelfUpdater.canRequestPackageInstalls()
+        val blockers = GitHubSetupDiagnostics.inspect(cfg, canInstall)
         return SelfUpdateUiState(
             installedVersionName = verName,
             installedVersionCode = verCode,
             lastWorkingVersion = lastWorking,
             previousRelease = gitHubKeyStore.getPreviousRelease(),
-            needsUnknownSourcesPermission = !apkSelfUpdater.canRequestPackageInstalls()
+            needsUnknownSourcesPermission = !canInstall,
+            setupBlockers = blockers,
+            updateHistory = gitHubKeyStore.getUpdateHistory()
         )
+    }
+
+    suspend fun verifyPostInstallStartupHealth(): Pair<Boolean, String> {
+        val (verName, verCode) = ApkVersionComparator.getInstalledVersionInfo(getApplication())
+        val prevCode = gitHubKeyStore.getLastVerifiedVersionCode()
+        val prevVerName = gitHubKeyStore.getLastWorkingVersion().ifBlank { "v$verName" }
+        val dbReadable = runCatching { memoryRepository.getRecentMemories(1); true }.getOrDefault(false)
+        val keystoreReadable = runCatching { gitHubKeyStore.loadConfig(); vault.loadAllSlotsMetadata(); true }.getOrDefault(false)
+        val unresolvedCrashes = runCatching {
+            db.crashReportDao().getAll().count { !it.resolved }
+        }.getOrDefault(0)
+
+        val (healthy, diagMsg) = selfHealing.diagnoseStartupHealth(
+            dbReadable = dbReadable,
+            keystoreReadable = keystoreReadable,
+            unresolvedCrashCount = unresolvedCrashes
+        )
+
+        if (prevCode == 0L || verCode > prevCode) {
+            val status = if (healthy) "VERIFIED" else "RECOVERY_CANDIDATE"
+            if (healthy) {
+                gitHubKeyStore.saveLastVerifiedVersionCode(verCode)
+                gitHubKeyStore.saveLastWorkingVersion("v$verName")
+            }
+            if (prevCode > 0L) {
+                gitHubKeyStore.appendUpdateHistory(
+                    UpdateHistoryEntry(
+                        fromVersion = prevVerName,
+                        toVersion = "v$verName",
+                        toVersionCode = verCode,
+                        sha256 = "",
+                        status = status,
+                        notes = diagMsg
+                    )
+                )
+            } else {
+                gitHubKeyStore.saveLastVerifiedVersionCode(verCode)
+            }
+            historyController.historyRepo.recordRegistryEvent(
+                FeatureRegistryHistoryEntity(
+                    featureId = "aura_app_v$verCode",
+                    featureName = "AURA AI v$verName",
+                    description = "Startup & post-install integrity verification check",
+                    discoverySource = "Update Integrity Engine",
+                    recommendingAgent = "Self-Healing Engine",
+                    participatingAgentsCsv = "Self-Healing Engine, Security Agent",
+                    discoveredAt = System.currentTimeMillis(),
+                    version = verName,
+                    changeEventType = if (healthy) "ACTIVATED" else "FAILED",
+                    dependencies = "Room DB + Keystore",
+                    permissionsRequired = "None",
+                    installationDate = System.currentTimeMillis(),
+                    testResults = diagMsg,
+                    activationStatus = if (healthy) "ACTIVE" else "FAILED",
+                    decisionReason = diagMsg,
+                    versionDiffSummary = if (prevCode > 0L) "Upgraded code $prevCode -> $verCode" else "Verified baseline v$verCode"
+                )
+            )
+            _selfUpdateState.value = _selfUpdateState.value.copy(
+                lastWorkingVersion = gitHubKeyStore.getLastWorkingVersion(),
+                updateHistory = gitHubKeyStore.getUpdateHistory()
+            )
+        }
+        return healthy to diagMsg
+    }
+
+    fun refreshGitHubSetupDiagnostics(cfgOverride: GitHubConfig? = null): List<String> {
+        val cfg = cfgOverride ?: _gitHubConfig.value
+        val canInstall = apkSelfUpdater.canRequestPackageInstalls()
+        val latest = _selfUpdateState.value.latestRelease
+        val blockers = GitHubSetupDiagnostics.inspect(cfg, canInstall, latest)
+        _selfUpdateState.value = _selfUpdateState.value.copy(
+            needsUnknownSourcesPermission = !canInstall,
+            setupBlockers = blockers
+        )
+        return blockers
     }
 
     fun saveGitHubSettings(
@@ -1292,10 +1712,12 @@ class AuraViewModel(application: Application) : AndroidViewModel(application) {
             _statusBanner.value = "Protected branch blocked. Aura pushes only to '$DEFAULT_AURA_BRANCH'."
             val saved = gitHubKeyStore.saveConfig(owner, repo, DEFAULT_AURA_BRANCH, token, allowWorkflowEdits)
             _gitHubConfig.value = saved
+            refreshGitHubSetupDiagnostics(saved)
             return
         }
         val saved = gitHubKeyStore.saveConfig(owner, repo, resolvedBranch, token, allowWorkflowEdits)
         _gitHubConfig.value = saved
+        refreshGitHubSetupDiagnostics(saved)
         _gitHubConnectionStatus.value = true to "Saved config for ${saved.owner.ifBlank { "?" }}/${saved.repo.ifBlank { "?" }} (branch: ${saved.effectivePushBranch})."
         _statusBanner.value = "GitHub settings saved (encrypted token stored locally)."
         viewModelScope.launch {
@@ -1570,6 +1992,84 @@ class AuraViewModel(application: Application) : AndroidViewModel(application) {
             )
             _isMergingToMain.value = false
         }
+    }
+
+    fun createPullRequestForBranch(title: String = "") {
+        val cfg = _gitHubConfig.value
+        if (!cfg.isConfigured || cfg.token.isBlank()) {
+            _statusBanner.value = "Configure GitHub owner, repo, and token before opening a Pull Request."
+            return
+        }
+        viewModelScope.launch {
+            _isPushingGitHub.value = true
+            val changelog = gitHubClient.generateChangelogMarkdown(
+                branch = cfg.effectivePushBranch,
+                featureTitle = title.ifBlank { "AURA Autonomous Branch Changes" },
+                pushedFiles = listOfNotNull(_lastGitHubCommitSha.value?.let { "Commit ${it.take(7)}" }),
+                testSummary = "Mandatory Gradle CI + unit test verification configured"
+            )
+            _latestChangelogMarkdown.value = changelog
+            val res = gitHubClient.createPullRequest(
+                config = cfg,
+                title = title.ifBlank { "AURA AI Autonomous Update (${cfg.effectivePushBranch})" },
+                body = changelog,
+                headBranch = cfg.effectivePushBranch
+            )
+            res.fold(
+                onSuccess = { pr ->
+                    _statusBanner.value = "Opened PR #${pr.number}: ${pr.htmlUrl}"
+                    refreshOpenPullRequests()
+                    memoryRepository.logAudit("GitHub Agent", "CREATE_PR:#${pr.number}", 3, "ALLOWED", pr.htmlUrl)
+                },
+                onFailure = { err ->
+                    _statusBanner.value = err.message ?: "Failed to open Pull Request."
+                }
+            )
+            _isPushingGitHub.value = false
+        }
+    }
+
+    fun refreshOpenPullRequests() {
+        val cfg = _gitHubConfig.value
+        if (!cfg.isConfigured) return
+        viewModelScope.launch {
+            val res = gitHubClient.listOpenPullRequests(cfg)
+            res.onSuccess { prs ->
+                _selfUpdateState.value = _selfUpdateState.value.copy(openPullRequests = prs)
+            }
+        }
+    }
+
+    fun triggerGitHubWorkflowDispatch() {
+        val cfg = _gitHubConfig.value
+        if (!cfg.isConfigured || cfg.token.isBlank()) {
+            _statusBanner.value = "Configure GitHub repo and PAT token first."
+            return
+        }
+        viewModelScope.launch {
+            val res = gitHubClient.triggerWorkflowDispatch(cfg)
+            res.fold(
+                onSuccess = { msg ->
+                    _statusBanner.value = msg
+                    startBuildStatusPolling(cfg.effectivePushBranch)
+                },
+                onFailure = { err ->
+                    _statusBanner.value = err.message ?: "Workflow dispatch failed."
+                }
+            )
+        }
+    }
+
+    fun generateCurrentChangelog(featureTitle: String = "") {
+        val cfg = _gitHubConfig.value
+        val changelog = gitHubClient.generateChangelogMarkdown(
+            branch = cfg.effectivePushBranch,
+            featureTitle = featureTitle.ifBlank { "AURA AI v${_selfUpdateState.value.installedVersionName}" },
+            pushedFiles = listOfNotNull(_lastGitHubCommitUrl.value),
+            testSummary = "Verified builds + unit tests"
+        )
+        _latestChangelogMarkdown.value = changelog
+        _statusBanner.value = "Generated release changelog for ${cfg.effectivePushBranch}."
     }
 
     fun startBuildStatusPolling(branchOverride: String? = null) {
@@ -1850,9 +2350,16 @@ class AuraViewModel(application: Application) : AndroidViewModel(application) {
             )
             downloadRes.fold(
                 onSuccess = { apkFile ->
-                    // Save current working version & previous release metadata before triggering installer
+                    // Save current working version & verify APK package/cert/versionCode/SHA-256 before triggering installer
+                    val expectedSha256 = release.expectedSha256 ?: release.sha256Asset?.let { shaAsset ->
+                        gitHubClient.fetchReleaseSha256(cfg, shaAsset).getOrNull()
+                    }
                     gitHubKeyStore.saveLastWorkingVersion("v${_selfUpdateState.value.installedVersionName}")
-                    val installOutcome = apkSelfUpdater.installApk(apkFile)
+                    val installOutcome = apkSelfUpdater.installApk(
+                        apkFile = apkFile,
+                        expectedSha256 = expectedSha256,
+                        allowDowngradeOrSame = isRollback
+                    )
                     when (installOutcome) {
                         is ApkInstallResult.SessionStarted -> {
                             _selfUpdateState.value = _selfUpdateState.value.copy(
@@ -1902,9 +2409,7 @@ class AuraViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun refreshInstallPermissionState() {
-        _selfUpdateState.value = _selfUpdateState.value.copy(
-            needsUnknownSourcesPermission = !apkSelfUpdater.canRequestPackageInstalls()
-        )
+        refreshGitHubSetupDiagnostics()
     }
 
     fun dispatchAutomation(command: AutomationCommand) {

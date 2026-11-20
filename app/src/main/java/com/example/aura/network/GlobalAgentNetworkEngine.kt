@@ -93,10 +93,14 @@ class GlobalAgentNetworkEngine(
         if (bearerToken.isNotBlank()) {
             trustGuard.saveExternalAgentToken(nodeId, name, bearerToken)
         }
+        val isKeylessProtocol = cleanEndpoint.contains("127.0.0.1") ||
+            cleanEndpoint.contains("localhost") ||
+            cleanEndpoint.contains(":11434") ||
+            cleanEndpoint.contains("github.com") ||
+            cleanEndpoint.contains("huggingface.co")
         val initialStatus = when {
             !hasSecureUrl -> AgentConnectionStatus.ERROR
-            bearerToken.isBlank() && !cleanEndpoint.contains("github.com") && !cleanEndpoint.contains("huggingface.co") ->
-                AgentConnectionStatus.AUTH_REQUIRED
+            bearerToken.isBlank() && !isKeylessProtocol -> AgentConnectionStatus.AUTH_REQUIRED
             else -> AgentConnectionStatus.DISCONNECTED
         }
         val node = ConnectedAgentNodeEntity(
@@ -107,7 +111,7 @@ class GlobalAgentNetworkEngine(
             modelName = modelName.trim(),
             endpointUrl = cleanEndpoint,
             connectionStatus = initialStatus,
-            trustStatus = if (bearerToken.isNotBlank() && hasSecureUrl) "AUTHENTICATED_EXTERNAL" else "UNTRUSTED",
+            trustStatus = if ((bearerToken.isNotBlank() || isKeylessProtocol) && hasSecureUrl) "AUTHENTICATED_EXTERNAL" else "UNTRUSTED",
             isBuiltIn = false,
             enabled = true,
             webhookUrl = webhookUrl.trim(),
@@ -316,8 +320,8 @@ class GlobalAgentNetworkEngine(
             }
             node.endpointUrl.startsWith("local://aura/") -> {
                 Result.success(
-                    "[${node.name}] Verified locally on ${node.providerOrPlatform}: received '$safeOutbound'. " +
-                        "Capabilities ready: ${node.allowedCapabilitiesCsv}."
+                    "[INTERNAL_LOCAL ${node.name} | ${node.endpointUrl}] Ready on-device (${node.providerOrPlatform}): '$safeOutbound'. " +
+                        "Capabilities: ${node.allowedCapabilitiesCsv}."
                 )
             }
             customProbe != null -> {
@@ -416,29 +420,93 @@ class GlobalAgentNetworkEngine(
                 message = "No Gemini API key configured in encrypted storage."
             )
         }
-        val probeUrl = when (node.nodeId) {
-            "node_ext_gemini" -> "https://generativelanguage.googleapis.com/v1beta/models?key=$bearer"
-            "node_ext_github" -> "https://api.github.com/rate_limit"
-            "node_ext_huggingface" -> "https://huggingface.co/api/models?limit=1"
-            "node_ext_companion" -> node.endpointUrl.trimEnd('/') + "/health"
+        val lowerEndpoint = node.endpointUrl.lowercase()
+        val isMcp = node.category.equals("MCP", true) ||
+            node.providerOrPlatform.contains("mcp", true) ||
+            lowerEndpoint.endsWith("/mcp")
+        val isA2a = !node.isBuiltIn && (node.category.equals("A2A", true) ||
+            node.providerOrPlatform.contains("a2a", true) ||
+            lowerEndpoint.endsWith("/a2a"))
+        val isClaude = node.providerOrPlatform.contains("claude", true) ||
+            node.providerOrPlatform.contains("anthropic", true) ||
+            lowerEndpoint.contains("anthropic.com")
+        val isOllama = node.providerOrPlatform.contains("ollama", true) ||
+            lowerEndpoint.contains(":11434") ||
+            lowerEndpoint.contains("/api/chat")
+
+        val probeUrl = when {
+            node.nodeId == "node_ext_gemini" -> "https://generativelanguage.googleapis.com/v1beta/models?key=$bearer"
+            node.nodeId == "node_ext_github" -> "https://api.github.com/rate_limit"
+            node.nodeId == "node_ext_huggingface" -> "https://huggingface.co/api/models?limit=1"
+            node.nodeId == "node_ext_companion" -> node.endpointUrl.trimEnd('/') + "/health"
+            isA2a -> node.endpointUrl.substringBefore("/a2a").trimEnd('/') + "/.well-known/agent.json"
+            isOllama -> node.endpointUrl.substringBefore("/api/").trimEnd('/') + "/api/tags"
+            isClaude -> node.endpointUrl.substringBefore("/v1/").trimEnd('/') + "/v1/models"
+            lowerEndpoint.endsWith("/chat/completions") -> node.endpointUrl.removeSuffix("/chat/completions") + "/models"
             else -> node.endpointUrl
         }
-        val reqBuilder = Request.Builder().url(probeUrl).get()
-            .header("User-Agent", "AURA-AI-Global-Network/1.0")
-        if (bearer.isNotBlank() && node.nodeId != "node_ext_gemini") {
-            reqBuilder.header("Authorization", "Bearer $bearer")
+
+        val reqBuilder = Request.Builder().url(probeUrl)
+            .header("User-Agent", "AURA-AI-Global-Network/2.1")
+        when {
+            isMcp -> {
+                val rpc = JSONObject().apply {
+                    put("jsonrpc", "2.0")
+                    put("id", 1)
+                    put("method", "tools/list")
+                    put("params", JSONObject())
+                }
+                reqBuilder.post(rpc.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
+                if (bearer.isNotBlank()) reqBuilder.header("Authorization", "Bearer $bearer")
+            }
+            isClaude -> {
+                reqBuilder.get()
+                    .header("x-api-key", bearer)
+                    .header("anthropic-version", "2023-06-01")
+            }
+            else -> {
+                reqBuilder.get()
+                if (bearer.isNotBlank() && node.nodeId != "node_ext_gemini") {
+                    reqBuilder.header("Authorization", "Bearer $bearer")
+                }
+            }
         }
+
         val start = System.currentTimeMillis()
         try {
             okHttpClient.newCall(reqBuilder.build()).execute().use { resp ->
                 val latency = (System.currentTimeMillis() - start).coerceAtLeast(1L)
+                val rawBody = resp.body?.string().orEmpty()
                 when {
-                    resp.isSuccessful -> ProbeResult(
-                        status = AgentConnectionStatus.CONNECTED,
-                        trustStatus = "AUTHENTICATED_EXTERNAL",
-                        latencyMs = latency,
-                        message = "Heartbeat OK (HTTP ${resp.code}, ${latency}ms)."
-                    )
+                    resp.isSuccessful -> {
+                        val detail = when {
+                            isMcp -> {
+                                val toolCount = runCatching {
+                                    JSONObject(rawBody).optJSONObject("result")?.optJSONArray("tools")?.length() ?: 0
+                                }.getOrDefault(0)
+                                "MCP JSON-RPC OK (HTTP ${resp.code}, ${latency}ms, $toolCount tools)."
+                            }
+                            isA2a -> {
+                                val cardName = runCatching {
+                                    JSONObject(rawBody).optString("name", node.name)
+                                }.getOrDefault(node.name)
+                                "A2A Agent Card verified: $cardName (HTTP ${resp.code}, ${latency}ms)."
+                            }
+                            isOllama -> {
+                                val modelsCount = runCatching {
+                                    JSONObject(rawBody).optJSONArray("models")?.length() ?: 0
+                                }.getOrDefault(0)
+                                "Ollama node online ($modelsCount local models, ${latency}ms)."
+                            }
+                            else -> "Heartbeat OK (HTTP ${resp.code}, ${latency}ms)."
+                        }
+                        ProbeResult(
+                            status = AgentConnectionStatus.CONNECTED,
+                            trustStatus = "AUTHENTICATED_EXTERNAL",
+                            latencyMs = latency,
+                            message = detail
+                        )
+                    }
                     resp.code == 401 || resp.code == 403 -> ProbeResult(
                         status = AgentConnectionStatus.AUTH_REQUIRED,
                         trustStatus = "UNTRUSTED",
@@ -483,7 +551,7 @@ class GlobalAgentNetworkEngine(
                         "https://huggingface.co/api/models?search=${java.net.URLEncoder.encode(safeMessage.take(60), "UTF-8")}&limit=3"
                     }
                 )
-                .header("User-Agent", "AURA-AI-Global-Network/1.0")
+                .header("User-Agent", "AURA-AI-Global-Network/2.1")
                 .build()
             return@withContext runCatching {
                 okHttpClient.newCall(req).execute().use { resp ->
@@ -494,17 +562,103 @@ class GlobalAgentNetworkEngine(
         }
 
         val bearer = trustGuard.getExternalAgentToken(node.nodeId)
-        val jsonBody = JSONObject().apply {
-            put("agent", node.name)
-            put("model", node.modelName.ifBlank { GEMINI_DEFAULT_MODEL })
-            put("topic", topic)
-            put("message", safeMessage)
+        val lowerEndpoint = node.endpointUrl.lowercase()
+        val isMcp = node.category.equals("MCP", true) ||
+            node.providerOrPlatform.contains("mcp", true) ||
+            lowerEndpoint.endsWith("/mcp")
+        val isA2a = !node.isBuiltIn && (node.category.equals("A2A", true) ||
+            node.providerOrPlatform.contains("a2a", true) ||
+            lowerEndpoint.endsWith("/a2a"))
+        val isClaude = node.providerOrPlatform.contains("claude", true) ||
+            node.providerOrPlatform.contains("anthropic", true) ||
+            lowerEndpoint.contains("anthropic.com")
+        val isOllama = node.providerOrPlatform.contains("ollama", true) ||
+            lowerEndpoint.contains(":11434") ||
+            lowerEndpoint.contains("/api/chat")
+        val isOpenAiCompat = lowerEndpoint.endsWith("/chat/completions")
+
+        val jsonPayload = when {
+            isMcp -> JSONObject().apply {
+                put("jsonrpc", "2.0")
+                put("id", System.currentTimeMillis())
+                put("method", "tools/call")
+                put("params", JSONObject().apply {
+                    put("name", node.modelName.ifBlank { "aura_query" })
+                    put("arguments", JSONObject().apply {
+                        put("topic", topic)
+                        put("query", safeMessage)
+                    })
+                })
+            }
+            isA2a -> JSONObject().apply {
+                put("jsonrpc", "2.0")
+                put("id", System.currentTimeMillis())
+                put("method", "tasks/send")
+                put("params", JSONObject().apply {
+                    put("id", "task-${System.currentTimeMillis()}")
+                    put("message", JSONObject().apply {
+                        put("role", "user")
+                        put("parts", org.json.JSONArray().apply {
+                            put(JSONObject().apply {
+                                put("type", "text")
+                                put("text", "[$topic] $safeMessage")
+                            })
+                        })
+                    })
+                })
+            }
+            isClaude -> JSONObject().apply {
+                put("model", node.modelName.ifBlank { "claude-3-5-haiku-latest" })
+                put("max_tokens", 1024)
+                put("system", "Respond as ${node.name} on topic '$topic'.")
+                put("messages", org.json.JSONArray().apply {
+                    put(JSONObject().apply {
+                        put("role", "user")
+                        put("content", safeMessage)
+                    })
+                })
+            }
+            isOllama -> JSONObject().apply {
+                put("model", node.modelName.ifBlank { "llama3.2:3b" })
+                put("stream", false)
+                put("messages", org.json.JSONArray().apply {
+                    put(JSONObject().apply {
+                        put("role", "user")
+                        put("content", "[$topic] $safeMessage")
+                    })
+                })
+            }
+            isOpenAiCompat -> JSONObject().apply {
+                put("model", node.modelName.ifBlank { "gpt-4o-mini" })
+                put("messages", org.json.JSONArray().apply {
+                    put(JSONObject().apply {
+                        put("role", "system")
+                        put("content", "Respond as ${node.name} on topic '$topic'.")
+                    })
+                    put(JSONObject().apply {
+                        put("role", "user")
+                        put("content", safeMessage)
+                    })
+                })
+            }
+            else -> JSONObject().apply {
+                put("agent", node.name)
+                put("model", node.modelName.ifBlank { GEMINI_DEFAULT_MODEL })
+                put("topic", topic)
+                put("message", safeMessage)
+            }
         }.toString()
+
         val reqBuilder = Request.Builder()
             .url(node.endpointUrl)
-            .post(jsonBody.toRequestBody("application/json; charset=utf-8".toMediaType()))
-            .header("User-Agent", "AURA-AI-Global-Network/1.0")
-        if (bearer.isNotBlank()) reqBuilder.header("Authorization", "Bearer $bearer")
+            .post(jsonPayload.toRequestBody("application/json; charset=utf-8".toMediaType()))
+            .header("User-Agent", "AURA-AI-Global-Network/2.1")
+        if (isClaude) {
+            reqBuilder.header("x-api-key", bearer)
+            reqBuilder.header("anthropic-version", "2023-06-01")
+        } else if (bearer.isNotBlank()) {
+            reqBuilder.header("Authorization", "Bearer $bearer")
+        }
 
         runCatching {
             okHttpClient.newCall(reqBuilder.build()).execute().use { resp ->
@@ -512,7 +666,36 @@ class GlobalAgentNetworkEngine(
                 val raw = resp.body?.string().orEmpty()
                 runCatching {
                     val obj = JSONObject(raw)
-                    obj.optString("reply", obj.optString("message", raw))
+                    when {
+                        isMcp -> {
+                            val res = obj.optJSONObject("result")
+                            val contentArr = res?.optJSONArray("content")
+                            (0 until (contentArr?.length() ?: 0))
+                                .mapNotNull { contentArr?.optJSONObject(it)?.optString("text")?.takeIf { s -> s.isNotBlank() } }
+                                .joinToString("\n")
+                                .ifBlank { res?.toString() ?: raw }
+                        }
+                        isA2a -> {
+                            val res = obj.optJSONObject("result")
+                            val parts = res?.optJSONObject("status")?.optJSONObject("message")?.optJSONArray("parts")
+                            (0 until (parts?.length() ?: 0))
+                                .mapNotNull { parts?.optJSONObject(it)?.optString("text")?.takeIf { s -> s.isNotBlank() } }
+                                .joinToString("\n")
+                                .ifBlank { res?.optString("reply", res.optString("output", raw)) ?: raw }
+                        }
+                        isClaude -> {
+                            val contentArr = obj.optJSONArray("content")
+                            (0 until (contentArr?.length() ?: 0))
+                                .mapNotNull { contentArr?.optJSONObject(it)?.optString("text")?.takeIf { s -> s.isNotBlank() } }
+                                .joinToString("\n")
+                                .ifBlank { raw }
+                        }
+                        isOllama -> obj.optJSONObject("message")?.optString("content")
+                            ?.takeIf { it.isNotBlank() } ?: obj.optString("response", raw)
+                        isOpenAiCompat -> obj.optJSONArray("choices")?.optJSONObject(0)
+                            ?.optJSONObject("message")?.optString("content")?.takeIf { it.isNotBlank() } ?: raw
+                        else -> obj.optString("reply", obj.optString("message", raw))
+                    }
                 }.getOrDefault(raw)
             }
         }

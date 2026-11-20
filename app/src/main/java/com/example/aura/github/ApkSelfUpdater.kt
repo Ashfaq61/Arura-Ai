@@ -15,6 +15,15 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.io.File
+import java.security.MessageDigest
+
+data class ApkIntegrityReport(
+    val packageName: String,
+    val versionCode: Long,
+    val versionName: String,
+    val fileSha256: String,
+    val signingCertSha256: String
+)
 
 sealed interface ApkInstallResult {
     data class SessionStarted(val message: String) : ApkInstallResult
@@ -69,6 +78,100 @@ class ApkInstallStatusReceiver : BroadcastReceiver() {
 
 class ApkSelfUpdater(private val context: Context) {
 
+    fun verifyApkIntegrity(
+        apkFile: File,
+        expectedSha256: String? = null,
+        allowDowngradeOrSame: Boolean = false
+    ): Result<ApkIntegrityReport> {
+        if (!apkFile.exists() || apkFile.length() <= 0L) {
+            return Result.failure(IllegalArgumentException("Downloaded APK file is missing or empty."))
+        }
+
+        val actualFileSha256 = computeSha256Hex(apkFile)
+        val cleanExpected = expectedSha256?.trim()?.lowercase()?.takeIf { it.isNotBlank() }
+        if (cleanExpected != null && !actualFileSha256.equals(cleanExpected, ignoreCase = true)) {
+            return Result.failure(
+                SecurityException(
+                    "APK SHA-256 integrity mismatch: expected $cleanExpected, got $actualFileSha256. Install aborted."
+                )
+            )
+        }
+
+        val pm = context.packageManager
+        val signingFlags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            PackageManager.GET_SIGNING_CERTIFICATES
+        } else {
+            @Suppress("DEPRECATION")
+            PackageManager.GET_SIGNATURES
+        }
+
+        val archiveInfo = runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                pm.getPackageArchiveInfo(apkFile.absolutePath, PackageManager.PackageInfoFlags.of(signingFlags.toLong()))
+            } else {
+                @Suppress("DEPRECATION")
+                pm.getPackageArchiveInfo(apkFile.absolutePath, signingFlags)
+            }
+        }.getOrNull() ?: return Result.failure(
+            IllegalStateException("Invalid APK package archive: could not read package manifest.")
+        )
+
+        val expectedPackage = context.packageName
+        if (archiveInfo.packageName != expectedPackage) {
+            return Result.failure(
+                SecurityException(
+                    "Package name mismatch: APK is '${archiveInfo.packageName}' but installed app is '$expectedPackage'. Install aborted."
+                )
+            )
+        }
+
+        val archiveVersionCode = extractVersionCode(archiveInfo)
+        val (_, installedVersionCode) = ApkVersionComparator.getInstalledVersionInfo(context)
+        if (!allowDowngradeOrSame && archiveVersionCode <= installedVersionCode) {
+            return Result.failure(
+                SecurityException(
+                    "APK versionCode check failed: downloaded build ($archiveVersionCode) is not newer than installed build ($installedVersionCode)."
+                )
+            )
+        }
+
+        val archiveSigners = extractSigningCertSha256Set(archiveInfo)
+        val installedInfo = runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                pm.getPackageInfo(expectedPackage, PackageManager.PackageInfoFlags.of(signingFlags.toLong()))
+            } else {
+                @Suppress("DEPRECATION")
+                pm.getPackageInfo(expectedPackage, signingFlags)
+            }
+        }.getOrNull()
+        val installedSigners = if (installedInfo != null) extractSigningCertSha256Set(installedInfo) else emptySet()
+
+        if (installedSigners.isNotEmpty()) {
+            if (archiveSigners.isEmpty()) {
+                return Result.failure(
+                    SecurityException("APK signing certificate missing or unsigned; refused to replace signed app.")
+                )
+            }
+            if (archiveSigners.intersect(installedSigners).isEmpty()) {
+                return Result.failure(
+                    SecurityException(
+                        "Signing certificate mismatch: downloaded APK signer (${archiveSigners.first()}) does not match installed app signer (${installedSigners.first()})."
+                    )
+                )
+            }
+        }
+
+        return Result.success(
+            ApkIntegrityReport(
+                packageName = archiveInfo.packageName,
+                versionCode = archiveVersionCode,
+                versionName = archiveInfo.versionName ?: "unknown",
+                fileSha256 = actualFileSha256,
+                signingCertSha256 = archiveSigners.firstOrNull() ?: "UNAVAILABLE_IN_HOST"
+            )
+        )
+    }
+
     fun verifyApkPackageName(apkFile: File): Result<PackageInfo> {
         if (!apkFile.exists() || apkFile.length() <= 0L) {
             return Result.failure(IllegalArgumentException("Downloaded APK file is missing or empty."))
@@ -112,12 +215,20 @@ class ApkSelfUpdater(private val context: Context) {
         }.getOrDefault(false)
     }
 
-    fun installApk(apkFile: File): ApkInstallResult {
-        val verified = verifyApkPackageName(apkFile)
+    fun installApk(
+        apkFile: File,
+        expectedSha256: String? = null,
+        allowDowngradeOrSame: Boolean = false
+    ): ApkInstallResult {
+        val verified = verifyApkIntegrity(
+            apkFile = apkFile,
+            expectedSha256 = expectedSha256,
+            allowDowngradeOrSame = allowDowngradeOrSame
+        )
         if (verified.isFailure) {
             runCatching { apkFile.delete() }
             return ApkInstallResult.Failed(
-                verified.exceptionOrNull()?.message ?: "APK package verification failed."
+                verified.exceptionOrNull()?.message ?: "APK integrity verification failed."
             )
         }
 
@@ -193,6 +304,36 @@ class ApkSelfUpdater(private val context: Context) {
         context.startActivity(intent)
     }
 
+    private fun extractVersionCode(pkgInfo: PackageInfo): Long {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            pkgInfo.longVersionCode
+        } else {
+            @Suppress("DEPRECATION")
+            pkgInfo.versionCode.toLong()
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun extractSigningCertSha256Set(pkgInfo: PackageInfo): Set<String> {
+        val signatures = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            val info = pkgInfo.signingInfo
+            if (info != null) {
+                if (info.hasMultipleSigners()) info.apkContentsSigners else info.signingCertificateHistory
+            } else {
+                pkgInfo.signatures
+            }
+        } else {
+            pkgInfo.signatures
+        } ?: return emptySet()
+
+        val md = MessageDigest.getInstance("SHA-256")
+        return signatures.mapNotNull { sig ->
+            val bytes = sig?.toByteArray() ?: return@mapNotNull null
+            md.reset()
+            md.digest(bytes).joinToString("") { "%02x".format(it) }
+        }.toSet()
+    }
+
     companion object {
         private const val ACTION_INSTALL_COMPLETE = "com.example.aura.ACTION_APK_INSTALL_COMPLETE"
 
@@ -201,6 +342,19 @@ class ApkSelfUpdater(private val context: Context) {
 
         internal fun updateInstallFeedback(feedback: PackageInstallFeedback) {
             _installFeedback.value = feedback
+        }
+
+        fun computeSha256Hex(file: File): String {
+            val md = MessageDigest.getInstance("SHA-256")
+            file.inputStream().use { input ->
+                val buf = ByteArray(16 * 1024)
+                while (true) {
+                    val read = input.read(buf)
+                    if (read <= 0) break
+                    md.update(buf, 0, read)
+                }
+            }
+            return md.digest().joinToString("") { "%02x".format(it) }
         }
 
         fun createUnknownSourcesIntent(context: Context): Intent {
