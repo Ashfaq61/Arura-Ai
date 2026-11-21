@@ -75,7 +75,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [36])
+@Config(sdk = [35])
 class Aura21EcosystemRobolectricTest {
 
     private fun testOkHttpClient(): OkHttpClient = OkHttpClient.Builder()

@@ -62,7 +62,7 @@ import java.io.File
 import java.net.InetSocketAddress
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [36])
+@Config(sdk = [35])
 class ZeroQuestionAutonomyRobolectricTest {
 
     private data class AutonomyTestStack(
