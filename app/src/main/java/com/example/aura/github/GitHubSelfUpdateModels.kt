@@ -148,7 +148,56 @@ data class SelfUpdateUiState(
     val updateHistory: List<UpdateHistoryEntry> = emptyList()
 )
 
+data class CiSigningSecretSpec(
+    val secretName: String,
+    val requirement: String,
+    val setupNotes: String
+)
+
 object GitHubSetupDiagnostics {
+    fun releaseSigningSecretsGuide(): List<CiSigningSecretSpec> = listOf(
+        CiSigningSecretSpec(
+            secretName = "KEYSTORE_BASE64",
+            requirement = "Required",
+            setupNotes = "Base64 of your existing production .jks keystore (alias 'upload'). Never generate a replacement keystore if a production build is already published."
+        ),
+        CiSigningSecretSpec(
+            secretName = "STORE_PASSWORD",
+            requirement = "Required (or KEYSTORE_PASSWORD)",
+            setupNotes = "Keystore password for the production .jks file (CI accepts either STORE_PASSWORD or KEYSTORE_PASSWORD)."
+        ),
+        CiSigningSecretSpec(
+            secretName = "KEY_PASSWORD",
+            requirement = "Required",
+            setupNotes = "Private key password for alias 'upload' (for PKCS12 single-password keystores, set the same password)."
+        ),
+        CiSigningSecretSpec(
+            secretName = "KEY_ALIAS",
+            requirement = "Required",
+            setupNotes = "Set to 'upload' to match app/build.gradle.kts signingConfigs.release."
+        ),
+        CiSigningSecretSpec(
+            secretName = "EXPECTED_SIGNING_CERT_SHA256",
+            requirement = "Optional (Recommended)",
+            setupNotes = "64-hex SHA-256 fingerprint of your production signing cert to pin release APK identity."
+        )
+    )
+
+    fun detectMissingCiSigningSecrets(ciLogTail: String): List<String> {
+        if (ciLogTail.isBlank()) return emptyList()
+        val missing = linkedSetOf<String>()
+        val lower = ciLogTail.lowercase(Locale.US)
+        if (!lower.contains("missing") && !lower.contains("verify release signing")) {
+            return emptyList()
+        }
+        if (ciLogTail.contains("KEYSTORE_BASE64")) missing += "KEYSTORE_BASE64"
+        if (ciLogTail.contains("STORE_PASSWORD")) missing += "STORE_PASSWORD"
+        if (ciLogTail.contains("KEYSTORE_PASSWORD")) missing += "KEYSTORE_PASSWORD"
+        if (ciLogTail.contains("KEY_PASSWORD")) missing += "KEY_PASSWORD"
+        if (ciLogTail.contains("KEY_ALIAS")) missing += "KEY_ALIAS"
+        return missing.toList()
+    }
+
     fun inspect(
         config: GitHubConfig,
         canRequestPackageInstalls: Boolean,
@@ -168,7 +217,7 @@ object GitHubSetupDiagnostics {
             blockers += "Missing Android REQUEST_INSTALL_PACKAGES ('Allow from this source') permission for in-place APK updates."
         }
         if (latestRelease != null && latestRelease.apkAsset == null) {
-            blockers += "Latest GitHub release '${latestRelease.tagName}' has no signed .apk asset attached."
+            blockers += "Latest GitHub release '${latestRelease.tagName}' has no signed .apk asset attached (verify CI secrets KEYSTORE_BASE64, STORE_PASSWORD/KEYSTORE_PASSWORD, KEY_PASSWORD, KEY_ALIAS)."
         }
         return blockers
     }

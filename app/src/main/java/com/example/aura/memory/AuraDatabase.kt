@@ -398,6 +398,12 @@ abstract class AuraDatabase : RoomDatabase() {
                     "aura_autonomous_db"
                 )
                     .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
+                    .addCallback(object : Callback() {
+                        override fun onOpen(db: SupportSQLiteDatabase) {
+                            super.onOpen(db)
+                            runCatching { db.query("PRAGMA busy_timeout = 10000").close() }
+                        }
+                    })
                     .build()
                     .also { INSTANCE = it }
             }

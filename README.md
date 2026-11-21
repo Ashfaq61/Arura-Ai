@@ -24,5 +24,22 @@ AURA AI is a modular, multi-agent, self-evolving Android assistant built with **
    - Enable **AURA AI Screen & Automation** in Android Accessibility Settings for live numbered node reading, screenshots, and gesture dispatch.
    - Enable **AURA AI Notification Reader** in Notification Access Settings for notification/WhatsApp summarization.
 
-## Automated Builds (GitHub Actions)
-See `.github/workflows/android-ci.yml`. Every push/PR runs `:app:testDebugUnitTest`, `:app:lintDebug`, and `:app:assembleDebug`, uploading the APK and test reports as workflow artifacts.
+## Automated Builds & Release Signing (GitHub Actions)
+See `.github/workflows/android-ci.yml`. Every push, PR, and manual dispatch runs `./gradlew testDebugUnitTest --stacktrace` and `./gradlew lintDebug --stacktrace` as mandatory gates.
+
+### Required GitHub Repository Secrets for Signed Release APKs
+Add these under **GitHub Repository → Settings → Secrets and variables → Actions → New repository secret**:
+
+1. **`KEYSTORE_BASE64`**: Base64-encoded contents of your **existing production** release keystore (`.jks` / `.keystore`) containing key alias `upload`.
+   - **Important**: **Never generate a replacement keystore** if an existing production APK is already installed or published, or in-place updates will fail and overwrite compatibility will break.
+   - Encode your existing keystore without line breaks:
+     - **Linux**: `base64 -w 0 my-upload-key.jks`
+     - **macOS**: `base64 -i my-upload-key.jks | tr -d '\n'`
+     - **PowerShell**: `[Convert]::ToBase64String([IO.File]::ReadAllBytes("my-upload-key.jks"))`
+2. **`STORE_PASSWORD`** *(or `KEYSTORE_PASSWORD`)*: Password for the release keystore (`app/build.gradle.kts` reads `STORE_PASSWORD`; CI also accepts `KEYSTORE_PASSWORD`).
+3. **`KEY_PASSWORD`**: Private key password for the release key alias (for PKCS12 keystores where key and store share one password, enter that same password).
+4. **`KEY_ALIAS`**: Set to `upload` (matches `keyAlias = "upload"` in `app/build.gradle.kts`; verify your keystore's alias with `keytool -list -v -keystore my-upload-key.jks`).
+- *Optional (Recommended)* **`EXPECTED_SIGNING_CERT_SHA256`**: 64-character SHA-256 fingerprint of your production signing certificate so CI enforces exact signing identity pinning before publishing.
+
+### Release Verification Gate
+Before uploading artifacts or creating a GitHub Release (`push` to `main` or `workflow_dispatch`), CI validates all signing secrets without printing values, rejects debug certificates, runs `assembleRelease`, verifies `apksigner` integrity, checks `package='com.aistudio.auraai.xkmqzp'` and monotonic `versionCode`, and verifies the published SHA-256 checksum.

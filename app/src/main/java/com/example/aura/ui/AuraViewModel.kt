@@ -2184,10 +2184,16 @@ class AuraViewModel(application: Application) : AndroidViewModel(application) {
                             }
                             CiBuildStage.FAILED -> {
                                 val logRes = gitHubClient.fetchFailedJobLogTail(cfg, run.runId, 30)
-                                _failedJobLogTail.value = logRes.getOrElse { err ->
+                                val logText = logRes.getOrElse { err ->
                                     "Could not fetch failed job logs: ${err.message}"
                                 }
-                                _statusBanner.value = "CI build failed (#${run.runId}). Review last 30 log lines or Ask Aura to fix."
+                                _failedJobLogTail.value = logText
+                                val missingSecrets = GitHubSetupDiagnostics.detectMissingCiSigningSecrets(logText)
+                                _statusBanner.value = if (missingSecrets.isNotEmpty()) {
+                                    "CI release signing blocked — missing GitHub repository secrets: ${missingSecrets.joinToString(", ")}"
+                                } else {
+                                    "CI build failed (#${run.runId}). Review last 30 log lines or Ask Aura to fix."
+                                }
                                 break
                             }
                             CiBuildStage.QUEUED, CiBuildStage.BUILDING, CiBuildStage.IDLE -> Unit
@@ -2217,7 +2223,12 @@ class AuraViewModel(application: Application) : AndroidViewModel(application) {
                         _statusBanner.value = "No GitHub Actions runs found yet for '$targetBranch'."
                     } else if (run.stage == CiBuildStage.FAILED) {
                         val logRes = gitHubClient.fetchFailedJobLogTail(cfg, run.runId, 30)
-                        _failedJobLogTail.value = logRes.getOrElse { "Could not load logs: ${it.message}" }
+                        val logText = logRes.getOrElse { "Could not load logs: ${it.message}" }
+                        _failedJobLogTail.value = logText
+                        val missingSecrets = GitHubSetupDiagnostics.detectMissingCiSigningSecrets(logText)
+                        if (missingSecrets.isNotEmpty()) {
+                            _statusBanner.value = "CI release signing blocked — add GitHub Actions secrets: ${missingSecrets.joinToString(", ")}"
+                        }
                     } else if (run.stage == CiBuildStage.QUEUED || run.stage == CiBuildStage.BUILDING) {
                         startBuildStatusPolling(targetBranch)
                     }
@@ -2234,6 +2245,11 @@ class AuraViewModel(application: Application) : AndroidViewModel(application) {
         val logTail = _failedJobLogTail.value
         if (logTail.isBlank()) {
             _statusBanner.value = "No failed build log lines available yet."
+            return
+        }
+        val missingSigningSecrets = GitHubSetupDiagnostics.detectMissingCiSigningSecrets(logTail)
+        if (missingSigningSecrets.isNotEmpty()) {
+            _statusBanner.value = "Configure missing GitHub repository secrets (${missingSigningSecrets.joinToString(", ")}) in GitHub Settings -> Secrets and variables -> Actions."
             return
         }
         if (_autoFixAttemptCount.value >= MAX_AUTO_FIX_ATTEMPTS) {

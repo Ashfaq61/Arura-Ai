@@ -752,6 +752,21 @@ class ZeroQuestionAutonomyRobolectricTest {
                 )
             )
             assertTrue(clear.isEmpty())
+
+            val guide = GitHubSetupDiagnostics.releaseSigningSecretsGuide()
+            assertTrue(guide.any { it.secretName == "KEYSTORE_BASE64" })
+            assertTrue(guide.any { it.secretName == "STORE_PASSWORD" })
+            assertTrue(guide.any { it.secretName == "KEY_PASSWORD" })
+            assertTrue(guide.any { it.secretName == "KEY_ALIAS" && it.setupNotes.contains("upload") })
+
+            val ciSecretsMissing = GitHubSetupDiagnostics.detectMissingCiSigningSecrets(
+                "BLOCKER: Missing required GitHub Actions release signing secrets:\n  - KEYSTORE_BASE64\n  - STORE_PASSWORD (or KEYSTORE_PASSWORD)\n  - KEY_ALIAS"
+            )
+            assertEquals(
+                listOf("KEYSTORE_BASE64", "STORE_PASSWORD", "KEYSTORE_PASSWORD", "KEY_ALIAS"),
+                ciSecretsMissing
+            )
+            assertTrue(GitHubSetupDiagnostics.detectMissingCiSigningSecrets("Kotlin compilation failed on line 42").isEmpty())
         } finally {
             tempFile.delete()
         }

@@ -75,6 +75,7 @@ import com.example.aura.github.CiBuildStage
 import com.example.aura.github.DEFAULT_AURA_BRANCH
 import com.example.aura.github.DiffLineType
 import com.example.aura.github.GITHUB_TOKEN_CREATE_URL
+import com.example.aura.github.GitHubSetupDiagnostics
 import com.example.aura.github.MAX_AUTO_FIX_ATTEMPTS
 import com.example.aura.github.PendingGitHubPushProposal
 import com.example.aura.ui.AuraViewModel
@@ -589,6 +590,34 @@ fun GitHubAutoBuildAndUpdateCard(viewModel: AuraViewModel) {
             }
 
             if (failedLogTail.isNotBlank()) {
+                val missingSigningSecrets = remember(failedLogTail) {
+                    GitHubSetupDiagnostics.detectMissingCiSigningSecrets(failedLogTail)
+                }
+                if (missingSigningSecrets.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.28f)),
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.7f)),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("ci_missing_signing_secrets_card")
+                    ) {
+                        Column(modifier = Modifier.padding(10.dp)) {
+                            Text(
+                                text = "Release Signing Blocked — Missing GitHub Repository Secrets",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.error
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = "Add these in GitHub Repo -> Settings -> Secrets and variables -> Actions: ${missingSigningSecrets.joinToString(", ")}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                        }
+                    }
+                }
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
                     text = "Failed Job Log (last 30 lines):",
@@ -633,6 +662,56 @@ fun GitHubAutoBuildAndUpdateCard(viewModel: AuraViewModel) {
                         Icon(Icons.Filled.AutoFixHigh, contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(modifier = Modifier.width(6.dp))
                         Text("Ask Aura to fix ($autoFixCount/$MAX_AUTO_FIX_ATTEMPTS)")
+                    }
+                }
+            }
+
+            var showSigningGuide by remember { mutableStateOf(false) }
+            Spacer(modifier = Modifier.height(8.dp))
+            OutlinedButton(
+                onClick = { showSigningGuide = !showSigningGuide },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("release_signing_guide_toggle")
+            ) {
+                Icon(Icons.Filled.Security, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(if (showSigningGuide) "Hide CI Release Signing Secrets Guide" else "CI Release Signing Secrets Guide")
+            }
+            if (showSigningGuide) {
+                Spacer(modifier = Modifier.height(6.dp))
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("release_signing_guide_card")
+                ) {
+                    Column(
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                        modifier = Modifier.padding(10.dp)
+                    ) {
+                        Text(
+                            text = "GitHub Repository -> Settings -> Secrets and variables -> Actions",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        GitHubSetupDiagnostics.releaseSigningSecretsGuide().forEach { spec ->
+                            Column {
+                                Text(
+                                    text = "${spec.secretName} (${spec.requirement})",
+                                    style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                Text(
+                                    text = spec.setupNotes,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
                     }
                 }
             }
