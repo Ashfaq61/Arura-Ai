@@ -5,7 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.net.Uri
-import android.os.Build
+import androidx.core.content.IntentCompat
 import com.example.aura.security.PrivacyDataRouter
 import com.example.aura.security.PromptInjectionDefender
 
@@ -141,21 +141,11 @@ class ShareAndClipboardManager(
         )
     }
 
-    @Suppress("DEPRECATION")
     private fun getParcelableUri(intent: Intent, key: String): Uri? {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            intent.getParcelableExtra(key, Uri::class.java)
-        } else {
-            intent.getParcelableExtra(key)
-        }
+        return IntentCompat.getParcelableExtra(intent, key, Uri::class.java)
     }
 
-    @Suppress("DEPRECATION")
     private fun getParcelableUriList(intent: Intent, key: String): List<Uri> {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            intent.getParcelableArrayListExtra(key, Uri::class.java).orEmpty()
-        } else {
-            intent.getParcelableArrayListExtra<Uri>(key).orEmpty()
-        }
+        return IntentCompat.getParcelableArrayListExtra(intent, key, Uri::class.java).orEmpty()
     }
 }

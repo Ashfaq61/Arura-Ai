@@ -10,6 +10,7 @@ import android.os.Bundle
 import android.view.Display
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import androidx.core.view.accessibility.AccessibilityNodeInfoCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -127,7 +128,7 @@ class AuraAccessibilityService : AccessibilityService() {
                     isVisibleToUser = visible,
                     isEnabled = node.isEnabled,
                     isFocused = node.isFocused,
-                    isChecked = node.isChecked
+                    isChecked = AccessibilityNodeInfoCompat.wrap(node).checked == AccessibilityNodeInfoCompat.CHECKED_STATE_TRUE
                 )
             )
         }

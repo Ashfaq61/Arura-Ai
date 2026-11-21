@@ -16,8 +16,8 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.NotificationsActive
-import androidx.compose.material.icons.filled.Send
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -148,7 +148,7 @@ fun IntelligentNotificationsTab(viewModel: AuraViewModel) {
                                 onClick = { viewModel.expansion.sendApprovedNotificationReply(item, draftText) },
                                 enabled = draftText.isNotBlank()
                             ) {
-                                Icon(Icons.Filled.Send, contentDescription = "Send approved reply")
+                                Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send approved reply")
                             }
                         }
                     } else {

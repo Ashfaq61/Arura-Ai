@@ -776,7 +776,11 @@ class ZeroQuestionAutonomyRobolectricTest {
             }
             Shadows.shadowOf(Looper.getMainLooper()).idle()
             assertTrue(vm.startupAutonomousCycleTriggered.value)
-            assertNotNull(vm.lastAutonomousReport.value)
+            val cycleReport = vm.lastAutonomousReport.value
+            assertNotNull(cycleReport)
+            assertTrue(cycleReport!!.periodicScheduleEnabled)
+            assertTrue(cycleReport.testVerificationSummary.contains("Runtime & Regression Checks"))
+            assertTrue(cycleReport.realChangesSummary.isNotEmpty())
             assertTrue(vm.selfUpdateState.value.setupBlockers.isNotEmpty())
             assertTrue(
                 vm.selfUpdateState.value.setupBlockers.any {

@@ -23,6 +23,9 @@ import com.example.aura.ai.MultiProviderRouter
 import com.example.aura.ai.MultilingualDetector
 import com.example.aura.ai.TaskDispatcher
 import com.example.aura.ai.VoiceEngineMode
+import com.example.aura.analytics.McpToolHealthAggregator
+import com.example.aura.analytics.McpToolHealthDashboardState
+import com.example.aura.analytics.McpToolHealthSummary
 import com.example.aura.automation.AccessibilityBridge
 import com.example.aura.automation.AutomationCommand
 import com.example.aura.automation.DeviceControlEngine
@@ -87,6 +90,7 @@ import com.example.aura.testing.BenchmarkLabEngine
 import com.example.aura.voice.VoiceEngine
 import com.example.aura.voice.VoiceOrbState
 import com.example.ui.theme.AuraThemeMode
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -96,6 +100,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -251,6 +256,34 @@ class AuraViewModel(application: Application) : AndroidViewModel(application) {
     val scheduledTasks = memoryRepository.scheduledTasks.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
     val benchmarkRuns = memoryRepository.benchmarkRuns.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
     val selfModRecords = memoryRepository.selfModRecords.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    private val _isRunningToolHealthSweep = MutableStateFlow(false)
+    val isRunningToolHealthSweep: StateFlow<Boolean> = _isRunningToolHealthSweep.asStateFlow()
+
+    private val mcpTelemetryLast24h = memoryRepository
+        .observeMcpTelemetrySince(System.currentTimeMillis() - McpToolHealthAggregator.WINDOW_24H_MS)
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
+    val toolHealthDashboard: StateFlow<McpToolHealthDashboardState> = combine(
+        mcpTools,
+        marketplaceTools,
+        mcpTelemetryLast24h
+    ) { descriptors, mktTools, logs ->
+        McpToolHealthAggregator.aggregate24h(
+            descriptors = descriptors,
+            marketplaceTools = mktTools,
+            auditLogs = logs,
+            nowMs = System.currentTimeMillis()
+        )
+    }.flowOn(Dispatchers.Default).stateIn(
+        scope = viewModelScope,
+        started = SharingStarted.Eagerly,
+        initialValue = McpToolHealthAggregator.aggregate24h(
+            descriptors = agentNetwork.mcpTools.value,
+            marketplaceTools = emptyList(),
+            auditLogs = emptyList()
+        )
+    )
 
     private val _deviceHealth = MutableStateFlow(deviceControl.readDeviceHealth())
     val deviceHealth: StateFlow<DeviceHealthSnapshot> = _deviceHealth.asStateFlow()
@@ -476,6 +509,9 @@ class AuraViewModel(application: Application) : AndroidViewModel(application) {
         historyController.initialize()
         globalNetworkController.initialize()
         viewModelScope.launch {
+            // Post-install / startup integrity verification runs first so crash & version checks complete immediately
+            verifyPostInstallStartupHealth()
+
             memoryRepository.seedInitialCatalogIfEmpty()
             mcpRuntime.syncEnabledToolsToNetwork()
             refreshHealth()
@@ -501,9 +537,6 @@ class AuraViewModel(application: Application) : AndroidViewModel(application) {
             if (currentPrefs.activeVoiceName != savedVoice) {
                 preferencesRepository.setActiveVoice(savedVoice)
             }
-
-            // Post-install / startup integrity verification (preserves user data, detects crashes & version upgrades)
-            verifyPostInstallStartupHealth()
 
             // Priority 9: Detect missing GitHub/install setup blockers immediately on startup
             val setupBlockers = refreshGitHubSetupDiagnostics()
@@ -1260,8 +1293,61 @@ class AuraViewModel(application: Application) : AndroidViewModel(application) {
         _requestedSystemSubTab.value = 3
     }
 
+    fun openToolHealthDashboard() {
+        _requestedSystemSubTab.value = 10
+    }
+
     fun consumeRequestedSystemSubTab() {
         _requestedSystemSubTab.value = null
+    }
+
+    fun runMcpToolHealthSweep() {
+        if (_isRunningToolHealthSweep.value) return
+        viewModelScope.launch {
+            _isRunningToolHealthSweep.value = true
+            try {
+                mcpRuntime.syncEnabledToolsToNetwork()
+                val mktTools = memoryRepository.getAllToolsOnce()
+                val coveredSlugs = mutableSetOf<String>()
+                var passed = 0
+                var failed = 0
+                for (tool in mktTools) {
+                    val slug = McpRuntimeEngine.extractMcpSlug(tool).lowercase()
+                    coveredSlugs += slug
+                    if (tool.status == "INSTALLED_ENABLED") {
+                        val (ok, _) = mcpRuntime.verifyToolExecution(tool)
+                        if (ok) passed++ else failed++
+                    }
+                }
+                for (desc in agentNetwork.mcpTools.value) {
+                    if (desc.name.lowercase() !in coveredSlugs) {
+                        val res = mcpRuntime.probeRegisteredDescriptor(desc)
+                        if (res.success) passed++ else failed++
+                    }
+                }
+                _statusBanner.value = "24h MCP Health Sweep complete: $passed passed, $failed failed."
+            } finally {
+                _isRunningToolHealthSweep.value = false
+            }
+        }
+    }
+
+    fun probeSingleMcpTool(summary: McpToolHealthSummary) {
+        viewModelScope.launch {
+            val mkt = summary.marketplaceToolId?.let { memoryRepository.getTool(it) }
+            if (mkt != null) {
+                val (ok, detail) = mcpRuntime.verifyToolExecution(mkt)
+                _statusBanner.value = "${summary.displayName}: ${if (ok) detail else "FAILED — $detail"}"
+            } else {
+                val desc = agentNetwork.mcpTools.value.firstOrNull { it.name.equals(summary.toolSlug, ignoreCase = true) }
+                if (desc != null) {
+                    val res = mcpRuntime.probeRegisteredDescriptor(desc)
+                    _statusBanner.value = "${summary.displayName}: ${if (res.success) "PASSED (${res.latencyMs}ms)" else "FAILED — ${res.outputText}"}"
+                } else {
+                    _statusBanner.value = "Tool '${summary.toolSlug}' is not currently registered."
+                }
+            }
+        }
     }
 
     fun saveGeminiApiKey(rawKey: String, customLabel: String = ""): Boolean {
@@ -2420,10 +2506,53 @@ class AuraViewModel(application: Application) : AndroidViewModel(application) {
         AccessibilityBridge.dispatch(command)
     }
 
+    fun rollbackFeatureFromRegistry(featureId: String, rollbackSnapshotJson: String) {
+        viewModelScope.launch {
+            val tools = memoryRepository.getAllToolsOnce()
+            val tool = tools.firstOrNull { it.id == featureId }
+            if (tool == null) {
+                _statusBanner.value = "Tool '$featureId' is no longer installed or uses proposal rollback."
+                return@launch
+            }
+            if (rollbackSnapshotJson.isBlank() && tool.previousVersion.isNullOrBlank()) {
+                _statusBanner.value = "No rollback snapshot recorded for '${tool.name}'."
+                return@launch
+            }
+            val restored = toolFactory.rollbackTool(
+                tool = tool,
+                rollbackSnapshotJson = rollbackSnapshotJson,
+                reason = "User initiated Feature Registry rollback"
+            )
+            historyController.historyRepo.recordRegistryEvent(
+                FeatureRegistryHistoryEntity(
+                    featureId = restored.id,
+                    featureName = restored.name,
+                    description = restored.description,
+                    discoverySource = "Feature Registry Rollback",
+                    recommendingAgent = "Self-Upgrade Agent",
+                    participatingAgentsCsv = "User, Self-Upgrade Agent, Testing Agent",
+                    discoveredAt = System.currentTimeMillis(),
+                    version = restored.version,
+                    previousVersion = tool.version,
+                    changeEventType = "ROLLED_BACK",
+                    dependencies = restored.dependencies,
+                    permissionsRequired = restored.requiredPermissions,
+                    testResults = restored.testResults,
+                    activationStatus = "ROLLED_BACK",
+                    decisionReason = "User rolled back '${tool.name}' from v${tool.version} -> v${restored.version}.",
+                    versionDiffSummary = "Rolled back v${tool.version} -> v${restored.version}"
+                )
+            )
+            memoryRepository.logAudit("Feature Registry", "ROLLBACK:${tool.name}", 3, "ALLOWED", "Restored v${restored.version}")
+            _statusBanner.value = "Rolled back '${tool.name}' to v${restored.version}."
+        }
+    }
+
     override fun onCleared() {
         super.onCleared()
         ciPollingJob?.cancel()
         expansion.cleanup()
+        callMessaging.stopMonitoringCallState()
         voiceEngine.release()
     }
 }

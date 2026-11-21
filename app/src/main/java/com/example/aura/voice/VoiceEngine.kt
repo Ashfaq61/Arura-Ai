@@ -725,7 +725,7 @@ class VoiceEngine(
         val done = CompletableDeferred<Boolean>()
         pendingUtterances[utteranceId] = done
         try {
-            val locale = if (language == AuraLanguage.URDU) Locale("ur", "PK") else Locale.US
+            val locale = if (language == AuraLanguage.URDU) Locale.forLanguageTag("ur-PK") else Locale.US
             engine.language = locale
             engine.setPitch(DEVICE_FALLBACK_PITCH)
             engine.setSpeechRate(DEVICE_FALLBACK_RATE)

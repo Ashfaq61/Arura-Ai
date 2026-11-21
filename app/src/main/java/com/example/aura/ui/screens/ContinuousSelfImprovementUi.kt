@@ -35,6 +35,11 @@ import com.example.aura.history.BacklogPriorityScore
 import com.example.aura.history.FeatureLifecycleStage
 import com.example.aura.ui.AuraViewModel
 import com.example.aura.ui.components.StatusPill
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+
+private val cycleTimeFmt = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
 
 @Composable
 fun ZeroQuestionAutonomySection(viewModel: AuraViewModel) {
@@ -162,7 +167,10 @@ fun ZeroQuestionAutonomySection(viewModel: AuraViewModel) {
         }
 
         lastReport?.let { report ->
-            AutonomousReportCard(report = report)
+            AutonomousReportCard(
+                report = report,
+                periodicBackgroundEnabled = prefs.backgroundEvolutionEnabled
+            )
         }
 
         if (prioritizedBacklog.isNotEmpty()) {
@@ -250,7 +258,10 @@ private fun AutonomyToggleRow(
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun AutonomousReportCard(report: AutonomousCycleReport) {
+private fun AutonomousReportCard(
+    report: AutonomousCycleReport,
+    periodicBackgroundEnabled: Boolean
+) {
     val accent = when (report.cycleStatus) {
         "ACTIVATED_VERIFIED" -> MaterialTheme.colorScheme.tertiary
         "ROLLED_BACK" -> MaterialTheme.colorScheme.secondary
@@ -278,7 +289,17 @@ private fun AutonomousReportCard(report: AutonomousCycleReport) {
                 StatusPill(text = report.cycleStatus, accent = accent)
             }
 
+            Text(
+                text = "Last Run: ${cycleTimeFmt.format(Date(report.timestamp))} • Background Cycle: ${
+                    if (periodicBackgroundEnabled || report.periodicScheduleEnabled) "Active (6h WorkManager + Startup)" else "Manual Only"
+                }",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.testTag("autonomous_cycle_schedule_status")
+            )
+
             FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                StatusPill(text = "Discovered: ${report.discoveredCandidates.size}", accent = MaterialTheme.colorScheme.primary)
                 StatusPill(text = "Installed: ${report.toolsInstalledOrActivated.size}", accent = MaterialTheme.colorScheme.tertiary)
                 StatusPill(text = "Upgraded: ${report.toolsUpgraded.size}", accent = MaterialTheme.colorScheme.primary)
                 StatusPill(text = "Agents: ${report.agentsCreatedOrUpgraded.size}", accent = MaterialTheme.colorScheme.secondary)
@@ -286,6 +307,28 @@ private fun AutonomousReportCard(report: AutonomousCycleReport) {
             }
 
             Text("Decision: ${report.selectedApproachReason}", style = MaterialTheme.typography.bodySmall)
+            if (report.testVerificationSummary.isNotBlank()) {
+                Text(
+                    text = report.testVerificationSummary,
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.tertiary
+                )
+            }
+            if (report.discoveredCandidates.isNotEmpty()) {
+                Text(
+                    text = "Discovered Candidates: ${report.discoveredCandidates.joinToString(" | ")}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            if (report.realChangesSummary.isNotEmpty()) {
+                Text(
+                    text = "Verified Changes: ${report.realChangesSummary.joinToString(" • ")}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary
+                )
+            }
             if (report.toolsInstalledOrActivated.isNotEmpty()) {
                 Text("Activated Tools: ${report.toolsInstalledOrActivated.joinToString()}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.tertiary)
             }
@@ -297,6 +340,9 @@ private fun AutonomousReportCard(report: AutonomousCycleReport) {
             }
             if (report.bugsFixedOrRolledBack.isNotEmpty()) {
                 Text("Repairs / Rollbacks: ${report.bugsFixedOrRolledBack.joinToString()}", style = MaterialTheme.typography.labelSmall)
+            }
+            if (report.pendingApprovalItems.isNotEmpty()) {
+                Text("Pending User Approval: ${report.pendingApprovalItems.joinToString()}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary)
             }
             Text("In-Place APK Update: ${report.nativeApkUpdateStatus}", style = MaterialTheme.typography.labelSmall)
 

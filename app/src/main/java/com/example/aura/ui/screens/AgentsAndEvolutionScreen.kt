@@ -18,10 +18,10 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.AutoFixHigh
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Hub
-import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.Science
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material3.Button
@@ -93,7 +93,8 @@ fun AgentsAndEvolutionScreen(viewModel: AuraViewModel) {
         "Smart Routines",
         "Workflow Builder",
         "Recipes",
-        "App Compat"
+        "App Compat",
+        "Tool Health"
     )
 
     Column(modifier = Modifier.fillMaxSize()) {
@@ -143,6 +144,7 @@ fun AgentsAndEvolutionScreen(viewModel: AuraViewModel) {
             19 -> VisualWorkflowBuilderTab(viewModel)
             20 -> AutomationRecipesTab(viewModel)
             21 -> AppCompatibilityTab(viewModel)
+            22 -> ToolHealthDashboardTab(viewModel)
         }
     }
 
@@ -480,7 +482,7 @@ private fun ResearchHubTab(viewModel: AuraViewModel) {
                             context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(proj.url)))
                         }
                     }) {
-                        Icon(Icons.Filled.OpenInNew, contentDescription = null)
+                        Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = null)
                         Spacer(modifier = Modifier.width(6.dp))
                         Text("Open Source Link")
                     }

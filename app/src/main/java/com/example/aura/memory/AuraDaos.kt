@@ -51,6 +51,9 @@ interface AuditDao {
     @Query("SELECT * FROM audit_logs WHERE action LIKE '%' || :query || '%' OR details LIKE '%' || :query || '%' OR actor LIKE '%' || :query || '%' ORDER BY timestamp DESC LIMIT 200")
     fun searchAuditLogs(query: String): Flow<List<AuditLogEntity>>
 
+    @Query("SELECT * FROM audit_logs WHERE (action LIKE 'EXECUTE:%' OR action LIKE 'PROBE:%') AND timestamp >= :sinceTimestamp ORDER BY timestamp ASC LIMIT 2000")
+    fun observeMcpTelemetrySince(sinceTimestamp: Long): Flow<List<AuditLogEntity>>
+
     @Insert
     suspend fun insertLog(log: AuditLogEntity)
 

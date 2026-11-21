@@ -3,6 +3,7 @@ package com.example.aura.compat
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
+import androidx.core.content.pm.PackageInfoCompat
 import com.example.aura.automation.AccessibilityBridge
 import com.example.aura.memory.AdvancedRepository
 import com.example.aura.memory.AppCompatibilityProfileEntity
@@ -64,7 +65,7 @@ class AppCompatibilityEngine(
             }
 
             val verName = pkgInfo.versionName ?: "unknown"
-            val verCode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) pkgInfo.longVersionCode else @Suppress("DEPRECATION") pkgInfo.versionCode.toLong()
+            val verCode = PackageInfoCompat.getLongVersionCode(pkgInfo)
             val label = runCatching {
                 pkgInfo.applicationInfo?.let { context.packageManager.getApplicationLabel(it).toString() } ?: defaultLabel
             }.getOrDefault(defaultLabel)

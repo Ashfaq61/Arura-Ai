@@ -92,7 +92,8 @@ fun SystemCenterScreen(viewModel: AuraViewModel) {
         "Autonomy & Perms",
         "Backup & Sync",
         "Perf & Diag",
-        "Lang QA & Release"
+        "Lang QA & Release",
+        "Tool Health"
     )
 
     LaunchedEffect(requestedSubTab) {
@@ -109,7 +110,8 @@ fun SystemCenterScreen(viewModel: AuraViewModel) {
                 Tab(
                     selected = subTab == idx,
                     onClick = { subTab = idx },
-                    text = { Text(title, maxLines = 1) }
+                    text = { Text(title, maxLines = 1) },
+                    modifier = Modifier.testTag("system_subtab_$idx")
                 )
             }
         }
@@ -124,6 +126,7 @@ fun SystemCenterScreen(viewModel: AuraViewModel) {
             7 -> BackupAndMultiDeviceSyncTab(viewModel)
             8 -> PerformanceAndDiagnosticsTab(viewModel)
             9 -> LanguageQaAndReleaseTab(viewModel)
+            10 -> ToolHealthDashboardTab(viewModel)
         }
     }
 }

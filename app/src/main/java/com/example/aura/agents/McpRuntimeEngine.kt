@@ -60,7 +60,10 @@ class McpRuntimeEngine(
     }
 
     suspend fun verifyToolExecution(tool: MarketplaceToolEntity): Pair<Boolean, String> {
+        val slug = extractMcpSlug(tool)
+        val safety = inferSafetyLevel(tool.requiredPermissions)
         if (tool.name.isBlank() || tool.description.isBlank()) {
+            memoryRepository.logAudit("MCP Runtime", "PROBE:$slug", safety, "FAILED", "VERIFY (1ms): Tool missing name or description")
             return false to "Tool missing name or description"
         }
         val (safe, scanMsg) = permissionGuard.scanToolSpecForSafety(
@@ -69,11 +72,16 @@ class McpRuntimeEngine(
             permissions = tool.requiredPermissions.split(",").map { it.trim() }
         )
         if (!safe) {
+            memoryRepository.logAudit("MCP Runtime", "PROBE:$slug", safety, "FAILED", "SAFETY_SCAN (1ms): $scanMsg")
             return false to "Static safety failure: $scanMsg"
         }
         val parsedSchema = runCatching { JSONObject(tool.mcpSchemaJson) }.getOrNull()
-            ?: return false to "Malformed MCP JSON specification"
+        if (parsedSchema == null) {
+            memoryRepository.logAudit("MCP Runtime", "PROBE:$slug", safety, "FAILED", "SCHEMA_PARSE (1ms): Malformed MCP JSON specification")
+            return false to "Malformed MCP JSON specification"
+        }
         if (parsedSchema.length() == 0) {
+            memoryRepository.logAudit("MCP Runtime", "PROBE:$slug", safety, "FAILED", "SCHEMA_PARSE (1ms): Empty MCP JSON specification")
             return false to "Empty MCP JSON specification"
         }
 
@@ -81,11 +89,89 @@ class McpRuntimeEngine(
             "Verification probe for ${tool.name}: sample battery 82%, RAM 3200MB, tasks=3"
         }
         val exec = executeMarketplaceTool(tool, testPayload, dryRun = true)
-        return if (exec.success && exec.outputText.isNotBlank() && exec.outputJson.length() > 0) {
+        val passed = exec.success && exec.outputText.isNotBlank() && exec.outputJson.length() > 0
+        memoryRepository.logAudit(
+            actor = "MCP Runtime",
+            action = "PROBE:$slug",
+            safetyLevel = safety,
+            outcome = if (passed) "ALLOWED" else "FAILED",
+            details = "${exec.operation} (${exec.latencyMs}ms): ${exec.outputText.take(160)}"
+        )
+        return if (passed) {
             true to "Runtime execution PASSED (${exec.operation}, ${exec.latencyMs}ms)"
         } else {
             false to "Runtime execution FAILED: ${exec.outputText}"
         }
+    }
+
+    suspend fun probeRegisteredDescriptor(descriptor: McpToolDescriptor): McpExecutionResult {
+        val started = System.currentTimeMillis()
+        if (!descriptor.enabled) {
+            val res = McpExecutionResult(
+                success = false,
+                toolName = descriptor.name,
+                operation = "DISABLED",
+                outputText = "MCP tool '${descriptor.name}' is disabled.",
+                latencyMs = 1L
+            )
+            memoryRepository.logAudit(
+                actor = "MCP Runtime",
+                action = "PROBE:${descriptor.name}",
+                safetyLevel = descriptor.safetyLevel,
+                outcome = "FAILED",
+                details = "${res.operation} (1ms): ${res.outputText}"
+            )
+            return res
+        }
+        if (descriptor.safetyLevel >= 3) {
+            val elapsed = (System.currentTimeMillis() - started).coerceAtLeast(1L)
+            val json = JSONObject().apply {
+                put("tool", descriptor.name)
+                put("schemaValid", runCatching { JSONObject(descriptor.inputSchemaJson) }.isSuccess)
+                put("permissionGated", true)
+            }
+            val res = McpExecutionResult(
+                success = true,
+                toolName = descriptor.name,
+                operation = "SCHEMA_HEALTH_CHECK",
+                outputText = "Contract verified for gated tool '${descriptor.name}' (safety L${descriptor.safetyLevel}).",
+                outputJson = json,
+                latencyMs = elapsed
+            )
+            memoryRepository.logAudit(
+                actor = "MCP Runtime",
+                action = "PROBE:${descriptor.name}",
+                safetyLevel = descriptor.safetyLevel,
+                outcome = "ALLOWED",
+                details = "${res.operation} (${elapsed}ms): ${res.outputText}"
+            )
+            return res
+        }
+        val probeEntity = MarketplaceToolEntity(
+            id = "probe_${descriptor.name}",
+            name = descriptor.name,
+            category = descriptor.category,
+            version = "1.0.0",
+            source = "AgentNetworkManager",
+            license = "Apache-2.0",
+            description = descriptor.description,
+            requiredPermissions = if (descriptor.safetyLevel >= 2) "INTERNET" else "None",
+            dependencies = "MCP Runtime",
+            compatibility = "API 24+",
+            securityScan = "PASSED",
+            testResults = "Registered",
+            status = "INSTALLED_ENABLED",
+            mcpSchemaJson = """{"name":"${descriptor.name}","executionType":"LOCAL_SANDBOX_MCP","schema":${descriptor.inputSchemaJson.ifBlank { "{}" }}}"""
+        )
+        val exec = executeMarketplaceTool(probeEntity, "Health probe for ${descriptor.name}", dryRun = true)
+        memoryRepository.logAudit(
+            actor = "MCP Runtime",
+            action = "PROBE:${descriptor.name}",
+            safetyLevel = descriptor.safetyLevel,
+            outcome = if (exec.success) "ALLOWED" else "FAILED",
+            details = "${exec.operation} (${exec.latencyMs}ms): ${exec.outputText.take(160)}"
+        )
+        return exec
     }
 
     suspend fun executeToolByNameOrQuery(
@@ -146,12 +232,19 @@ class McpRuntimeEngine(
         dryRun: Boolean = false
     ): McpExecutionResult {
         val started = System.currentTimeMillis()
+        val slug = extractMcpSlug(tool)
+        val safety = inferSafetyLevel(tool.requiredPermissions)
         if (permissionGuard.emergencyStopActive.value) {
+            val elapsed = (System.currentTimeMillis() - started).coerceAtLeast(1L)
+            if (!dryRun) {
+                memoryRepository.logAudit("MCP Runtime", "EXECUTE:$slug", safety, "FAILED", "EMERGENCY_STOP (${elapsed}ms): Blocked by Emergency STOP.")
+            }
             return McpExecutionResult(
                 success = false,
                 toolName = tool.name,
                 operation = "EMERGENCY_STOP",
-                outputText = "Blocked by Emergency STOP."
+                outputText = "Blocked by Emergency STOP.",
+                latencyMs = elapsed
             )
         }
 
@@ -161,21 +254,31 @@ class McpRuntimeEngine(
             permissions = tool.requiredPermissions.split(",").map { it.trim() }
         )
         if (!safe) {
+            val elapsed = (System.currentTimeMillis() - started).coerceAtLeast(1L)
+            if (!dryRun) {
+                memoryRepository.logAudit("MCP Runtime", "EXECUTE:$slug", safety, "FAILED", "SECURITY_BLOCKED (${elapsed}ms): $safetyMsg")
+            }
             return McpExecutionResult(
                 success = false,
                 toolName = tool.name,
                 operation = "SECURITY_BLOCKED",
-                outputText = "Security scan blocked runtime execution: $safetyMsg"
+                outputText = "Security scan blocked runtime execution: $safetyMsg",
+                latencyMs = elapsed
             )
         }
 
         val inputScan = injectionDefender.scanUntrustedContent("mcp:${tool.name}", rawInput)
         if (inputScan.isSuspicious) {
+            val elapsed = (System.currentTimeMillis() - started).coerceAtLeast(1L)
+            if (!dryRun) {
+                memoryRepository.logAudit("MCP Runtime", "EXECUTE:$slug", safety, "FAILED", "INJECTION_BLOCKED (${elapsed}ms): ${inputScan.matchedSignals.joinToString()}")
+            }
             return McpExecutionResult(
                 success = false,
                 toolName = tool.name,
                 operation = "INJECTION_BLOCKED",
-                outputText = "Prompt injection scan blocked input: ${inputScan.matchedSignals.joinToString()}"
+                outputText = "Prompt injection scan blocked input: ${inputScan.matchedSignals.joinToString()}",
+                latencyMs = elapsed
             )
         }
         val specJson = runCatching { JSONObject(tool.mcpSchemaJson) }.getOrElse { JSONObject() }

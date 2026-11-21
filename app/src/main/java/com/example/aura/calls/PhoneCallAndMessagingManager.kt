@@ -2,13 +2,14 @@ package com.example.aura.calls
 
 import android.Manifest
 import android.app.role.RoleManager
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.telecom.TelecomManager
-import android.telephony.PhoneStateListener
 import android.telephony.TelephonyCallback
 import android.telephony.TelephonyManager
 import androidx.core.content.ContextCompat
@@ -63,6 +64,9 @@ class PhoneCallAndMessagingManager(private val context: Context) {
         }
     }
 
+    private var phoneStateReceiver: BroadcastReceiver? = null
+    private var telephonyCallbackRegistered = false
+
     fun startMonitoringCallState() {
         if (!hasReadPhoneStatePermission()) {
             _callState.value = CallStateLabel.UNAVAILABLE
@@ -71,23 +75,44 @@ class PhoneCallAndMessagingManager(private val context: Context) {
         val telephony = context.getSystemService(Context.TELEPHONY_SERVICE) as? TelephonyManager ?: return
         runCatching {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                telephony.registerTelephonyCallback(
-                    context.mainExecutor,
-                    object : TelephonyCallback(), TelephonyCallback.CallStateListener {
-                        override fun onCallStateChanged(state: Int) {
-                            updateCallState(state, null)
+                if (!telephonyCallbackRegistered) {
+                    telephony.registerTelephonyCallback(
+                        context.mainExecutor,
+                        object : TelephonyCallback(), TelephonyCallback.CallStateListener {
+                            override fun onCallStateChanged(state: Int) {
+                                updateCallState(state, null)
+                            }
                         }
+                    )
+                    telephonyCallbackRegistered = true
+                }
+            } else if (phoneStateReceiver == null) {
+                val receiver = object : BroadcastReceiver() {
+                    override fun onReceive(ctx: Context?, intent: Intent?) {
+                        if (intent?.action != TelephonyManager.ACTION_PHONE_STATE_CHANGED) return
+                        val state = when (intent.getStringExtra(TelephonyManager.EXTRA_STATE)) {
+                            TelephonyManager.EXTRA_STATE_RINGING -> TelephonyManager.CALL_STATE_RINGING
+                            TelephonyManager.EXTRA_STATE_OFFHOOK -> TelephonyManager.CALL_STATE_OFFHOOK
+                            else -> TelephonyManager.CALL_STATE_IDLE
+                        }
+                        updateCallState(state, null)
                     }
+                }
+                ContextCompat.registerReceiver(
+                    context,
+                    receiver,
+                    IntentFilter(TelephonyManager.ACTION_PHONE_STATE_CHANGED),
+                    ContextCompat.RECEIVER_EXPORTED
                 )
-            } else {
-                @Suppress("DEPRECATION")
-                telephony.listen(object : PhoneStateListener() {
-                    @Deprecated("Deprecated in Java")
-                    override fun onCallStateChanged(state: Int, phoneNumber: String?) {
-                        updateCallState(state, phoneNumber)
-                    }
-                }, PhoneStateListener.LISTEN_CALL_STATE)
+                phoneStateReceiver = receiver
             }
+        }
+    }
+
+    fun stopMonitoringCallState() {
+        phoneStateReceiver?.let { receiver ->
+            runCatching { context.unregisterReceiver(receiver) }
+            phoneStateReceiver = null
         }
     }
 

@@ -53,7 +53,10 @@ data class AutonomousCycleReport(
     val pendingApprovalItems: List<String>,
     val nativeApkUpdateStatus: String,
     val exactTechnicalBlockers: List<String>,
-    val cycleStatus: String
+    val cycleStatus: String,
+    val realChangesSummary: List<String> = emptyList(),
+    val testVerificationSummary: String = "",
+    val periodicScheduleEnabled: Boolean = false
 ) {
     val totalVerifiedChanges: Int
         get() = toolsInstalledOrActivated.size +
@@ -242,6 +245,20 @@ class ContinuousSelfImprovementEngine(
         agentNetwork.setAgentState("Self-Upgrade Agent", AgentStatus.ONLINE, "Idle")
         agentNetwork.setAgentState("Testing Agent", AgentStatus.ONLINE, "Idle")
 
+        val realChanges = buildList {
+            toolsInstalled.forEach { add("NEW_MCP_TOOL: $it (executable schema + runtime test passed)") }
+            toolsUpgraded.forEach { add("UPGRADED_MCP_CAPABILITY: $it (schema, PII redaction, metrics)") }
+            agentsUpdated.forEach { add("SPECIALIST_AGENT: $it") }
+            bugsHandled.forEach { add("SELF_HEAL_ACTION: $it") }
+        }
+        val verifiedCount = toolsInstalled.size + toolsUpgraded.size + agentsUpdated.size + bugsHandled.size
+        val testSummary = buildString {
+            append("Runtime & Regression Checks: $verifiedCount verified")
+            if (pendingApprovals.isNotEmpty()) append(", ${pendingApprovals.size} gated pending approval")
+            if (blockers.isNotEmpty()) append(", ${blockers.size} blocker(s) logged")
+            append(" | Healthy RAM ${health.availableRamMb}/${health.totalRamMb}MB")
+        }
+
         val report = AutonomousCycleReport(
             cycleId = cycleId,
             timestamp = System.currentTimeMillis(),
@@ -256,7 +273,10 @@ class ContinuousSelfImprovementEngine(
             pendingApprovalItems = pendingApprovals,
             nativeApkUpdateStatus = nativeApkStatus,
             exactTechnicalBlockers = blockers,
-            cycleStatus = cycleStatus
+            cycleStatus = cycleStatus,
+            realChangesSummary = realChanges,
+            testVerificationSummary = testSummary,
+            periodicScheduleEnabled = prefs.backgroundEvolutionEnabled
         )
         _lastReport.value = report
         return report

@@ -170,6 +170,7 @@ fun BenchmarkAndObservabilityTab(viewModel: AuraViewModel) {
     val audits by viewModel.auditLogs.collectAsStateWithLifecycle()
     val agents by viewModel.agents.collectAsStateWithLifecycle()
     val accessibilityOk by viewModel.accessibilityConnected.collectAsStateWithLifecycle()
+    val toolHealth by viewModel.toolHealthDashboard.collectAsStateWithLifecycle()
     val isBusy by viewModel.isBusy.collectAsStateWithLifecycle()
     var logSearch by remember { mutableStateOf("") }
 
@@ -182,6 +183,36 @@ fun BenchmarkAndObservabilityTab(viewModel: AuraViewModel) {
         verticalArrangement = Arrangement.spacedBy(12.dp),
         modifier = Modifier.fillMaxSize()
     ) {
+        // 24h MCP Tool Health Summary Shortcut Card
+        item {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                modifier = Modifier.fillMaxWidth().testTag("observability_tool_health_card")
+            ) {
+                Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Row(horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                        Text("MCP Tool Health (24h)", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                        StatusPill(
+                            text = "${toolHealth.healthyCount}/${toolHealth.totalRegisteredTools} Healthy",
+                            accent = if (toolHealth.faultyCount > 0) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.tertiary
+                        )
+                    }
+                    Text(
+                        text = "24h Runs: ${toolHealth.totalCalls24h} • Success: ${toolHealth.overallSuccessRatePercent?.let { "${it.toInt()}%" } ?: "—"} • Avg Latency: ${toolHealth.avgLatencyMs24h}ms",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    OutlinedButton(
+                        onClick = { viewModel.openToolHealthDashboard() },
+                        modifier = Modifier.fillMaxWidth().testTag("open_tool_health_dashboard_btn")
+                    ) {
+                        Text("Open 24h Tool Health Dashboard")
+                    }
+                }
+            }
+        }
+
         // ARTEMIS Benchmark Lab Card
         item {
             Card(

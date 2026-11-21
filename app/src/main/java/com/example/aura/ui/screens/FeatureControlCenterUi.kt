@@ -18,9 +18,9 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.AddCircle
 import androidx.compose.material.icons.filled.Inbox
-import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -322,7 +322,7 @@ fun FeatureDiscoveryInboxTab(viewModel: AuraViewModel) {
                         TextButton(onClick = {
                             runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(rec.sourceLinksCsv.substringBefore(",")))) }
                         }) {
-                            Icon(Icons.Filled.OpenInNew, contentDescription = null)
+                            Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = null)
                             Spacer(modifier = Modifier.width(4.dp))
                             Text("Open Source (${rec.sourceLinksCsv.take(40)})")
                         }

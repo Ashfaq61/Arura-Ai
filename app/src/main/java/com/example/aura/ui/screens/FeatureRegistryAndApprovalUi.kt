@@ -149,6 +149,22 @@ fun FeatureRegistryHistoryTab(viewModel: AuraViewModel) {
                             modifier = Modifier.padding(8.dp)
                         )
                     }
+                    if (item.rollbackSnapshotJson.isNotBlank() && item.changeEventType != "ROLLED_BACK") {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        OutlinedButton(
+                            onClick = {
+                                viewModel.rollbackFeatureFromRegistry(
+                                    featureId = item.featureId,
+                                    rollbackSnapshotJson = item.rollbackSnapshotJson
+                                )
+                            },
+                            modifier = Modifier.testTag("rollback_registry_${item.id}")
+                        ) {
+                            Icon(Icons.Filled.Restore, contentDescription = null)
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Roll Back to v${item.previousVersion ?: "previous"}")
+                        }
+                    }
                 }
             }
         }

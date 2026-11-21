@@ -33,6 +33,9 @@ class MemoryRepository(private val db: AuraDatabase) {
     fun searchAuditLogs(query: String): Flow<List<AuditLogEntity>> =
         if (query.isBlank()) auditLogs else db.auditDao().searchAuditLogs(query.trim())
 
+    fun observeMcpTelemetrySince(sinceTimestamp: Long): Flow<List<AuditLogEntity>> =
+        db.auditDao().observeMcpTelemetrySince(sinceTimestamp)
+
     suspend fun getRecentMemories(limit: Int = 12): List<MemoryEntryEntity> =
         db.memoryDao().getRecentMemories(limit)
 

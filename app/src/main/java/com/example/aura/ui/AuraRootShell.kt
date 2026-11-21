@@ -14,8 +14,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.filled.AutoAwesome
-import androidx.compose.material.icons.filled.Chat
 import androidx.compose.material.icons.filled.Dashboard
 import androidx.compose.material.icons.filled.SettingsApplications
 import androidx.compose.material.icons.filled.TouchApp
@@ -104,7 +104,7 @@ fun AuraRootShell(viewModel: AuraViewModel) {
 
     val tabs = listOf(
         AuraNavTab(0, "Core", Icons.Filled.Dashboard, "nav_core"),
-        AuraNavTab(1, "Chat", Icons.Filled.Chat, "nav_chat"),
+        AuraNavTab(1, "Chat", Icons.AutoMirrored.Filled.Chat, "nav_chat"),
         AuraNavTab(2, "Agents", Icons.Filled.AutoAwesome, "nav_agents"),
         AuraNavTab(3, "Control", Icons.Filled.TouchApp, "nav_control"),
         AuraNavTab(4, "System", Icons.Filled.SettingsApplications, "nav_system")

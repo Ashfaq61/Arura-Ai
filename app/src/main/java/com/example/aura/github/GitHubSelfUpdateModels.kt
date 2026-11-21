@@ -1,7 +1,7 @@
 package com.example.aura.github
 
 import android.content.Context
-import android.os.Build
+import androidx.core.content.pm.PackageInfoCompat
 import java.util.Locale
 
 const val DEFAULT_AURA_BRANCH = "aura-changes"
@@ -425,12 +425,7 @@ object ApkVersionComparator {
         return runCatching {
             val pkgInfo = context.packageManager.getPackageInfo(context.packageName, 0)
             val versionName = pkgInfo.versionName ?: "1.0.1"
-            val versionCode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                pkgInfo.longVersionCode
-            } else {
-                @Suppress("DEPRECATION")
-                pkgInfo.versionCode.toLong()
-            }
+            val versionCode = PackageInfoCompat.getLongVersionCode(pkgInfo)
             versionName to versionCode
         }.getOrDefault("1.0.1" to 1L)
     }
